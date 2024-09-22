@@ -636,7 +636,7 @@ def convert_wizardlm_data(data_dir, output_dir, num_examples=30000):
         with open(os.path.join(data_dir, "WizardLM_evol_instruct_V2_143k.json"), "r") as fin:
             examples = json.load(fin)
     else:  # try other data train-00000-of-00001-004cd1ba9dc05e6c.parquet
-        df = pd.read_parquet(os.path.join(data_dir, "train-00000-of-00001-004cd1ba9dc05e6c.parquet"))
+        df = pd.read_parquet(os.path.join(data_dir, "train-00000-of-00001.parquet"))
         examples = df.to_dict(orient="records")
     if num_examples:
         examples = random.sample(examples, k=num_examples)

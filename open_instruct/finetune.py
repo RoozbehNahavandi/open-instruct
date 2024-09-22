@@ -852,14 +852,14 @@ def main(args: FlatArguments):
         experiment_config["lr_scheduler_type"] = experiment_config["lr_scheduler_type"]
 
         # (Optional) Ai2 internal tracking
-        if args.wandb_entity is None:
-            args.wandb_entity = maybe_use_ai2_wandb_entity()
-            experiment_config.update(vars(beaker_config))
-        accelerator.init_trackers(
-            "open_instruct_internal",
-            experiment_config,
-            init_kwargs={"wandb": {"entity": args.wandb_entity, "tags": [args.exp_name] + get_wandb_tags()}},
-        )
+        # if args.wandb_entity is None:
+        #     args.wandb_entity = maybe_use_ai2_wandb_entity()
+        #     experiment_config.update(vars(beaker_config))
+        # accelerator.init_trackers(
+        #     "open_instruct_internal",
+        #     experiment_config,
+        #     init_kwargs={"wandb": {"entity": args.wandb_entity, "tags": [args.exp_name] + get_wandb_tags()}},
+        # )
         wandb_tracker = accelerator.get_tracker("wandb")
 
     # Train!
@@ -1102,4 +1102,5 @@ def main(args: FlatArguments):
 if __name__ == "__main__":
     parser = ArgumentParserPlus((FlatArguments))
     args = parser.parse()
+    print(f'args: {args}')
     main(args)
