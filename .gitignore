@@ -8,6 +8,7 @@ results
 models
 wandb
 data/*
+logs/*
 # !data/processed
 output/
 configs/beaker_configs/auto_created
