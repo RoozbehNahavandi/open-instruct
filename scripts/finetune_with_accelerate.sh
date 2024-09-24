@@ -32,5 +32,5 @@ accelerate launch \
     --num_train_epochs 2 \
     --output_dir output/tulu_v2_${MODEL_SIZE}/ \
     --with_tracking \
-    --report_to tensorboard \
+    --report_to wandb \
     --logging_steps 1
