@@ -896,6 +896,15 @@ def main(args: FlatArguments):
             starting_epoch = resume_step // len(train_dataloader)
             completed_steps = resume_step // args.gradient_accumulation_steps
             resume_step -= starting_epoch * len(train_dataloader)
+    
+    # if args.output_dir is not None:
+    #     save_with_accelerate(
+    #         accelerator,
+    #         model,
+    #         tokenizer,
+    #         args.output_dir,
+    #         args.use_lora,
+    #     )
 
     print(f"Starting from epoch {starting_epoch} and step {completed_steps}.")
     # update the progress_bar if load from checkpoint
@@ -1087,13 +1096,13 @@ def main(args: FlatArguments):
             print(f"Submit jobs after model training is finished - Stderr:\n{stderr.decode()}")
             print(f"Submit jobs after model training is finished - process return code: {process.returncode}")
 
-    if args.push_to_hub:
-        push_folder_to_hub(
-            accelerator,
-            args.output_dir,
-            args.hf_repo_id,
-            args.hf_repo_revision,
-        )
+    # if args.push_to_hub:
+    #     push_folder_to_hub(
+    #         accelerator,
+    #         args.output_dir,
+    #         args.hf_repo_id,
+    #         args.hf_repo_revision,
+    #     )
     accelerator.wait_for_everyone()
     if args.with_tracking:
         accelerator.end_training()

@@ -15,26 +15,26 @@ accelerate launch \
     --use_deepspeed \
     --deepspeed_config_file configs/ds_configs/stage3_no_offloading_accelerate.conf \
     open_instruct/finetune.py \
-    --model_name_or_path ../hf_llama2_models/${MODEL_SIZE} \
+    --model_name_or_path output/tulu_v2_${MODEL_SIZE}_lora \
     --use_flash_attn \
     --use_lora \
     --lora_rank 64 \
     --lora_alpha 16 \
     --lora_dropout 0.1 \
-    --tokenizer_name ../hf_llama2_models/${MODEL_SIZE} \
+    --tokenizer_name output/tulu_v2_${MODEL_SIZE}_lora \
     --use_slow_tokenizer \
     --train_file data/processed/tulu_v2/tulu_v2_data.jsonl \
-    --max_seq_length 2048 \
+    --max_seq_length 4096 \
     --preprocessing_num_workers 16 \
-    --checkpointing_steps 250 \
+    --checkpointing_steps epoch \
     --per_device_train_batch_size $BATCH_SIZE_PER_GPU \
     --gradient_accumulation_steps $GRADIENT_ACC_STEPS \
     --learning_rate 1e-4 \
     --lr_scheduler_type linear \
     --warmup_ratio 0.03 \
     --weight_decay 0. \
-    --num_train_epochs 2 \
-    --output_dir output/tulu_v2_${MODEL_SIZE}_lora_2/ \
+    --num_train_epochs 5 \
+    --output_dir output/tulu_v2_${MODEL_SIZE}_lora/ \
     --with_tracking \
     --report_to wandb \
     --wandb_entity roozbeh-n99 \

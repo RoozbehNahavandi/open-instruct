@@ -19,6 +19,7 @@ from collections import OrderedDict, defaultdict
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import List, Literal, Optional, Tuple, Union
+import os
 
 try:
     import deepspeed
@@ -315,7 +316,6 @@ def batch_generation(
         query_responses.append(query_response)
         logitss.append(logits)
     return torch.cat(query_responses, 0), torch.cat(logitss, 0)
-
 
 def save_with_accelerate(
     accelerator: Accelerator,
