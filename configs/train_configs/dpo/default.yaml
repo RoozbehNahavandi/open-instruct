@@ -18,6 +18,7 @@ output_dir: output/dpo_7b_recreate2/
 with_tracking: true
 report_to:
   - wandb
+wandb_entity: roozbeh-n99
 logging_steps: 1
 checkpointing_steps: 1000
 keep_last_n_checkpoints: 3
