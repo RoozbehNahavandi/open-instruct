@@ -652,7 +652,8 @@ def get_last_checkpoint(folder: str, incomplete: bool = False) -> Optional[str]:
         checkpoints = [path for path in checkpoints if os.path.exists(os.path.join(folder, path, "COMPLETED"))]
     if len(checkpoints) == 0:
         return
-    return os.path.join(folder, max(checkpoints, key=lambda x: x.split("_")[-1]))
+    
+    return os.path.join(folder, max(checkpoints, key=lambda x: int(x.split("_")[-1])))
 
 
 def get_last_checkpoint_path(args, incomplete: bool = False) -> str:

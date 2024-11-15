@@ -10,6 +10,9 @@ import time
 from dataclasses import asdict, dataclass
 from queue import Empty, Queue
 from typing import List, Literal, Optional, Tuple
+import subprocess
+import torch.distributed as dist
+
 
 import numpy as np
 import pandas as pd
@@ -50,6 +53,7 @@ from open_instruct.model_utils import (
     first_true_indices,
     forward,
     get_reward,
+    get_multiple_reward,
     prepare_deepspeed,
     print_rich_single_line_metrics,
     print_rich_table,
@@ -150,9 +154,13 @@ class Args:
     local_rollout_forward_batch_size: int = 64
     """per rank no grad forward pass in the rollout phase"""
     reward_model_path: str = "EleutherAI/pythia-160m"
-    """the path to the reward model"""
+    """the path to the reward model 1"""
+    reward_model2_path: str = None
+    """the path to the reward model 2"""
     reward_model_revision: Optional[str] = None
-    """the revision of the reward model"""
+    """the revision of the reward model 1"""
+    reward_model2_revision: Optional[str] = None
+    """the revision of the reward model 2"""
 
     # generation config
     response_length: int = 53
@@ -202,9 +210,11 @@ class Args:
     # wandb and HF tracking configs
     with_tracking: bool = False
     """If toggled, this experiment will be tracked with Weights and Biases"""
-    wandb_project_name: str = "open_instruct_internal"
+    wandb_project_name: str = "open_instruct_ppo"
     """The wandb's project name"""
-    wandb_entity: Optional[str] = None
+    wandb_run_name: str = "ppo_tuluv2_7b"
+    """The wandb run's name"""
+    wandb_entity: Optional[str] = 'roozbeh-n99'
     """The entity (team) of wandb's project"""
     push_to_hub: bool = True
     """Whether to upload the saved model to huggingface"""
@@ -247,6 +257,8 @@ def process_dataset_mixer(value) -> Tuple[Optional[dict], Optional[str]]:
 def calculate_runtime_args_and_accelerator(args: Args, model_config: ModelConfig) -> Accelerator:
     """calculate (in-place) runtime args such as the effective batch size, word size, etc."""
     accelerator = Accelerator(gradient_accumulation_steps=args.gradient_accumulation_steps)
+
+
     args.world_size = accelerator.num_processes
     args.local_batch_size = args.per_device_train_batch_size * args.gradient_accumulation_steps * args.num_mini_batches
     args.micro_batch_size = int(args.per_device_train_batch_size * args.world_size)
@@ -312,7 +324,7 @@ def vllm_generate(
         gpu_memory_utilization=vllm_gpu_memory_utilization,
         max_model_len=max_model_len,
     )
-    print("🔥🔥🔥 vllm loaded")
+    print("🔥🔥🔥 🍆🍆🍆vllm loaded")
     llmp = llm.llm_engine.model_executor.driver_worker.model_runner.model
     for training_step in range(resume_training_step, num_training_steps + 1):
         items = param_prompt_Q.get()
@@ -405,9 +417,35 @@ def masked_whiten(values: torch.Tensor, mask: torch.Tensor, shift_mean: bool = T
     return whitened
 
 
+
+
+def init_dist(args):
+    node_list = os.environ['SLURM_NODELIST']
+    num_gpus = torch.cuda.device_count()
+    args.global_rank = int(os.environ['SLURM_PROCID'])
+    args.local_rank = args.global_rank % num_gpus
+    # args.world_size = int(os.environ['SLURM_NTASKS'])
+    args.world_size = 8
+
+    os.environ['WORLD_SIZE'] = str(args.world_size)
+    os.environ['RANK'] = str(args.global_rank)
+    addr = os.environ['MASTER_ADDR']
+    port = os.environ['MASTER_PORT']
+    dist.init_process_group(backend='nccl')
+    torch.cuda.set_device(args.local_rank)
+    print(f"proc_id: {args.global_rank}; local_rank: {args.local_rank}; node_list: {node_list}; num_gpus: {num_gpus}; addr: {addr}; port: {port}")
+    print("CUDA available:", torch.cuda.is_available())
+    print("Number of GPUs:", torch.cuda.device_count())
+    return args
+
+
 def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
+
+    # init_dist(args)
     accelerator = calculate_runtime_args_and_accelerator(args, model_config)
     local_seed = args.seed + accelerator.process_index
+    subprocess.run(['nvidia-smi'], shell=True)
+
 
     # set up experiment tracking and seeds
     all_configs = {}
@@ -426,9 +464,9 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
             wandb.init(
                 project=args.wandb_project_name,
                 entity=args.wandb_entity,
+                name=args.wandb_run_name,
                 sync_tensorboard=True,
                 config=all_configs,
-                name=args.run_name,
                 save_code=True,
                 tags=[args.exp_name] + get_wandb_tags(),
             )
@@ -525,6 +563,7 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
         attn_implementation="flash_attention_2",
         use_cache=False,
     )
+
     if policy.config.vocab_size != reward_model.config.vocab_size:
         raise ValueError(
             "Policy and reward model must have the same vocab size. "
@@ -532,6 +571,7 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
             "If they don't have the same vocab size, the policy could generate tokens which "
             "is going to cause index out of bound error in the reward model."
         )
+
     model = PolicyAndValueWrapper(policy, value_model)
     if model_config.gradient_checkpointing:
         model.gradient_checkpointing_enable()
@@ -603,6 +643,8 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
                 except Exception as e:
                     print(e)
             self.preemptied = True
+
+        
 
     ph = PreemptionHandler()
 
@@ -786,6 +828,7 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
                         )
 
                     # Response Processing 2. run reward model on the truncated responses
+                    reward_models = [reward_model, reward_model]
                     postprocessed_query_response = torch.cat((query, postprocessed_response), 1)
                     sequence_length = first_true_indices(postprocessed_response == tokenizer.pad_token_id) - 1
                     _, score, _ = get_reward(
@@ -795,6 +838,8 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
                     full_value, _, _ = get_reward(
                         unwrapped_value_model, query_response, tokenizer.pad_token_id, context_length
                     )
+                    # print(f'score: {score} {score.shape}, full_value: {full_value} {full_value.shape}')
+                    # print('--------------')
                     value = full_value[:, context_length - 1 : -1].squeeze(-1)
 
                     responses.append(response)
@@ -813,6 +858,8 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
                 global_scores = accelerator.gather(scores)
                 accelerator.print(f"global_scores: {global_scores}, {global_scores.mean()}")
                 values = torch.cat(values, 0)
+                print(f'responses.shape: {responses.shape}, postprocessed_responses.shape: {postprocessed_responses.shape}')
+                print(f'values.shape: {values.shape}')
                 del (logprob, ref_logprob, full_value, value, score)
                 gc.collect()
                 torch.cuda.empty_cache()
@@ -861,6 +908,7 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
                 if args.whiten_rewards:
                     rewards = masked_whiten(rewards, mask=~padding_mask_p1, shift_mean=False)
                     rewards = torch.masked_fill(rewards, padding_mask_p1, 0)
+                print(f'rewards.shape: {rewards.shape}')
 
                 # 6. compute advantages and returns
                 lastgaelam = 0
@@ -873,6 +921,8 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
                     advantages_reversed.append(lastgaelam)
                 advantages = torch.stack(advantages_reversed[::-1], axis=1)
                 returns = advantages + values
+                print(f'advantages.shape: {advantages.shape}, returns.shape: {returns.shape}, ')
+
                 advantages = masked_whiten(advantages, ~padding_mask)
                 advantages = torch.masked_fill(advantages, padding_mask, 0)
                 torch.cuda.empty_cache()
@@ -920,6 +970,16 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
                         pg_loss_max = torch.max(pg_losses, pg_losses2)
                         pg_loss = masked_mean(pg_loss_max, ~padding_mask[micro_batch_inds])
                         loss = pg_loss + args.vf_coef * vf_loss
+
+                        # subprocess.run(['nvidia-smi'], shell=True)
+
+                        # global_rank = accelerator.process_index
+                        # local_rank = accelerator.local_process_index
+                        # world_size = accelerator.num_processes
+
+                        # print(f'Global Rank: {global_rank}')
+                        # print(f'Local Rank: {local_rank}')
+                        # print(f'World Size: {world_size}')
 
                         accelerator.backward(loss)
                         optimizer.step()
@@ -1006,6 +1066,13 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
         del (metrics, kl, non_score_reward, rlhf_reward)
         gc.collect()
         torch.cuda.empty_cache()
+        # if training_step % 5 == 0:
+        #     print(f'training_step: {training_step}')
+        # if not training_step % 10:
+        #     output_dir = f"step_{training_step}"
+        #     if args.checkpoint_output_dir is not None:
+        #         output_dir = os.path.join(args.checkpoint_output_dir, output_dir)
+        #     accelerator.save_state(output_dir)
 
     if not ph.preemptied:
         # save model
@@ -1013,6 +1080,7 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
         original_tokenizer = AutoTokenizer.from_pretrained(
             model_config.model_name_or_path, revision=model_config.model_revision
         )
+        print(f'Saving the model to {args.output_dir}')
         save_with_accelerate(
             accelerator,
             model,
@@ -1021,47 +1089,47 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
             model_attribute_to_save="policy",
         )
 
-        # Ai2 specific logic
-        if is_beaker_job() and accelerator.is_main_process:
-            if args.hf_metadata_dataset:
-                dataset_list = list(args.dataset_mixer_dict.keys())
-                # mainly just focussing here on what would be useful for the leaderboard.
-                # wandb will have even more useful information.
-                metadata_blob = {
-                    "model_name": args.exp_name,
-                    "model_type": "sft",
-                    "datasets": dataset_list,
-                    "base_model": model_config.model_name_or_path,
-                    "wandb_path": wandb.run.get_url(),
-                    "beaker_experiment": beaker_config.beaker_experiment_url,
-                    "beaker_datasets": beaker_config.beaker_dataset_id_urls,
-                }
-                upload_metadata_to_hf(
-                    metadata_blob,
-                    "metadata.json",
-                    args.hf_metadata_dataset,
-                    "results/" + args.hf_repo_revision,  # to match what the auto-evals name as.
-                )
+        # # Ai2 specific logic
+        # if is_beaker_job() and accelerator.is_main_process:
+        #     if args.hf_metadata_dataset:
+        #         dataset_list = list(args.dataset_mixer_dict.keys())
+        #         # mainly just focussing here on what would be useful for the leaderboard.
+        #         # wandb will have even more useful information.
+        #         metadata_blob = {
+        #             "model_name": args.exp_name,
+        #             "model_type": "sft",
+        #             "datasets": dataset_list,
+        #             "base_model": model_config.model_name_or_path,
+        #             "wandb_path": wandb.run.get_url(),
+        #             "beaker_experiment": beaker_config.beaker_experiment_url,
+        #             "beaker_datasets": beaker_config.beaker_dataset_id_urls,
+        #         }
+        #         upload_metadata_to_hf(
+        #             metadata_blob,
+        #             "metadata.json",
+        #             args.hf_metadata_dataset,
+        #             "results/" + args.hf_repo_revision,  # to match what the auto-evals name as.
+        #         )
 
-            if args.try_launch_beaker_eval_jobs and len(beaker_config.beaker_dataset_id_urls) > 0:
-                command = f"""\
-                python mason.py  \
-                    --cluster ai2/allennlp-cirrascale ai2/general-cirrascale-a5000 ai2/general-cirrascale-a5000 ai2/s2-cirrascale ai2/general-cirrascale \
-                    --priority low \
-                    --preemptible \
-                    --budget ai2/allennlp \
-                    --workspace ai2/tulu-2-improvements \
-                    --image nathanl/open_instruct_auto \
-                    --pure_docker_mode \
-                    --gpus 0 -- python scripts/wait_beaker_dataset_model_upload_then_evaluate_model.py \
-                    --beaker_workload_id {beaker_config.beaker_workload_id} \
-                    --model_name {args.hf_repo_revision}
-                """
-                process = subprocess.Popen(["bash", "-c", command], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                stdout, stderr = process.communicate()
-                print(f"Submit jobs after model training is finished - Stdout:\n{stdout.decode()}")
-                print(f"Submit jobs after model training is finished - Stderr:\n{stderr.decode()}")
-                print(f"Submit jobs after model training is finished - process return code: {process.returncode}")
+        #     if args.try_launch_beaker_eval_jobs and len(beaker_config.beaker_dataset_id_urls) > 0:
+        #         command = f"""\
+        #         python mason.py  \
+        #             --cluster ai2/allennlp-cirrascale ai2/general-cirrascale-a5000 ai2/general-cirrascale-a5000 ai2/s2-cirrascale ai2/general-cirrascale \
+        #             --priority low \
+        #             --preemptible \
+        #             --budget ai2/allennlp \
+        #             --workspace ai2/tulu-2-improvements \
+        #             --image nathanl/open_instruct_auto \
+        #             --pure_docker_mode \
+        #             --gpus 0 -- python scripts/wait_beaker_dataset_model_upload_then_evaluate_model.py \
+        #             --beaker_workload_id {beaker_config.beaker_workload_id} \
+        #             --model_name {args.hf_repo_revision}
+        #         """
+        #         process = subprocess.Popen(["bash", "-c", command], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        #         stdout, stderr = process.communicate()
+        #         print(f"Submit jobs after model training is finished - Stdout:\n{stdout.decode()}")
+        #         print(f"Submit jobs after model training is finished - Stderr:\n{stderr.decode()}")
+        #         print(f"Submit jobs after model training is finished - process return code: {process.returncode}")
 
         if args.push_to_hub:
             push_folder_to_hub(
@@ -1070,11 +1138,10 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
                 args.hf_repo_id,
                 args.hf_repo_revision,
             )
-
-        if accelerator.is_main_process:
-            # remove args.checkpoint_output_dir
-            if os.path.exists(args.checkpoint_output_dir):
-                shutil.rmtree(args.checkpoint_output_dir, ignore_errors=True)
+        # if accelerator.is_main_process:
+        #     # remove args.checkpoint_output_dir
+        #     if os.path.exists(args.checkpoint_output_dir):
+        #         shutil.rmtree(args.checkpoint_output_dir, ignore_errors=True)
 
 
 if __name__ == "__main__":

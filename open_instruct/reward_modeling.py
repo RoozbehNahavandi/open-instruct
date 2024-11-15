@@ -5,6 +5,10 @@ import time
 from dataclasses import asdict, dataclass
 from typing import List, Literal, Optional, Tuple
 
+import subprocess
+import torch.distributed as dist
+
+
 import numpy as np
 import pandas as pd
 import torch
@@ -194,8 +198,31 @@ def layer_init(layer: nn.Module, std: float):
     return layer
 
 
+def init_dist(args):
+    node_list = os.environ['SLURM_NODELIST']
+    num_gpus = torch.cuda.device_count()
+    args.global_rank = int(os.environ['SLURM_PROCID'])
+    args.local_rank = args.global_rank % num_gpus
+    args.world_size = int(os.environ['SLURM_NTASKS'])
+    os.environ['WORLD_SIZE'] = str(args.world_size)
+    os.environ['RANK'] = str(args.global_rank)
+    addr = os.environ['MASTER_ADDR']
+    port = os.environ['MASTER_PORT']
+    dist.init_process_group(backend='nccl')
+    torch.cuda.set_device(args.local_rank)
+    print(f"proc_id: {args.global_rank}; local_rank: {args.local_rank}; ntasks: {args.world_size}; node_list: {node_list}; num_gpus: {num_gpus}; addr: {addr}; port: {port}")
+    print("CUDA available:", torch.cuda.is_available())
+    print("Number of GPUs:", torch.cuda.device_count())
+    return args
+
 def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
+    # Enable multi-node training
+    init_dist(args)
+
     accelerator = calculate_runtime_args_and_accelerator(args, model_config)
+    subprocess.run(['nvidia-smi'], shell=True)
+    print('after initializing accelerate.')
+
     local_seed = args.seed + accelerator.process_index
 
     # set up experiment tracking and seeds
@@ -291,6 +318,7 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
     model: PreTrainedModel = AutoModelForSequenceClassification.from_pretrained(
         model_config.model_name_or_path, revision=model_config.model_revision, num_labels=1
     )
+
     if args.resize_token_embeddings:  # optimize for tensor core
         model.resize_token_embeddings(len(tokenizer), pad_to_multiple_of=8)
     if model_config.gradient_checkpointing:
@@ -338,7 +366,6 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
     gradient_accumulation_idx = 0
     episode = 0
     model.train()
-
     # training loop
     for _ in range(args.num_train_epochs):
         for data in dataloader:
@@ -351,6 +378,8 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
                 rejected_reward = predicted_reward[data[INPUT_IDS_CHOSEN_KEY].shape[0] :]
                 accuracy = (chosen_reward > rejected_reward).float().mean()
                 loss = -F.logsigmoid(chosen_reward - rejected_reward).mean()
+                subprocess.run(['nvidia-smi'], shell=True)
+
                 accelerator.backward(loss)
                 optimizer.step()
                 optimizer.zero_grad()

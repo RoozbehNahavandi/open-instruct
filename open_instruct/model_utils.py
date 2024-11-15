@@ -138,7 +138,7 @@ def first_true_indices(bools: torch.Tensor, dtype=torch.long) -> torch.Tensor:
 
 
 def get_reward(
-    model: torch.nn.Module, query_responses: torch.Tensor, pad_token_id: int, context_length: int
+    model: torch.nn.Module, query_responses: torch.Tensor, pad_token_id: int, context_length: int, weights: List[int] = [1]
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     This function computes reward scores for a batch of query responses based on a pre-trained reward model.
@@ -169,7 +169,10 @@ def get_reward(
     position_ids = attention_mask.cumsum(1) - attention_mask.long()  # exclusive cumsum
 
     # Access the LM backbone from the reward model using its base model prefix
-    lm_backbone = getattr(model, model.base_model_prefix)
+    if not hasattr(model, 'module'):
+        lm_backbone = getattr(model, model.base_model_prefix)
+    else:
+        lm_backbone = getattr(model.module, model.module.base_model_prefix)
 
     # Replace padding tokens with zeros in the input IDs (so padding tokens won't affect the model's processing)
     # Shape: (batch_size, sequence_length)
@@ -182,7 +185,10 @@ def get_reward(
         output_hidden_states=True,
         use_cache=False,  # otherwise mistral-based RM would error out
     )
-    reward_logits = model.score(output.hidden_states[-1])  # (batch_size, sequence_length)
+    if not hasattr(model, 'module'):
+        reward_logits = model.score(output.hidden_states[-1])  # (batch_size, sequence_length)
+    else:
+        reward_logits = model.module.score(output.hidden_states[-1])
 
     # Calculate the length of each sequence by finding the first occurrence of a padding token after the context
     # sequence_lengths shape: (batch_size,)
@@ -206,6 +212,112 @@ def get_reward(
         sequence_lengths,
     )
 
+
+
+def get_multiple_reward(
+    models: torch.nn.Module, query_responses: torch.Tensor, pad_token_id: int, context_length: int, weights: List[int] = [1]
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    This function computes reward scores for a batch of query responses based on a pre-trained reward model.
+
+    Args:
+        model (torch.nn.Module): The pre-trained reward model.
+        query_responses (torch.Tensor): Tensor containing the tokenized responses for which to compute rewards.
+            Shape: (batch_size, sequence_length)
+        pad_token_id (int): The ID used for padding tokens in the tokenized sequences.
+        context_length (int): The length of the prompt or context preceding the completions.
+
+    Returns:
+        Tuple[torch.Tensor, torch.Tensor, torch.Tensor]: A tuple containing:
+            - reward_logits: The logits output from the model for all tokens in the sequences.
+              Shape: (batch_size, sequence_length)
+            - final_scores: The final reward scores, one for each sequence, after adjusting for sequence lengths.
+              Shape: (batch_size,)
+            - sequence_lengths: The lengths of each sequence (excluding padding).
+              Shape: (batch_size,)
+    """
+
+    # Create an attention mask where tokens that are not padding have a value of 1, and padding tokens have a value of 0
+    # Shape: (batch_size, sequence_length)
+    attention_mask = query_responses != pad_token_id
+
+    # Calculate position IDs for each token, considering the cumulative sum of the attention mask (to exclude padding)
+    # Shape: (batch_size, sequence_length)
+    position_ids = attention_mask.cumsum(1) - attention_mask.long()  # exclusive cumsum
+
+    # # Access the LM backbone from the reward model using its base model prefix
+    lm_backbones = []
+    for model in models:
+        if hasattr(model, 'module'):
+            lm_backbone = getattr(model.module, model.module.base_model_prefix)
+        else:
+            lm_backbone = getattr(model, model.base_model_prefix)
+        lm_backbones.append(lm_backbone)
+        # Replace padding tokens with zeros in the input IDs (so padding tokens won't affect the model's processing)
+        # Shape: (batch_size, sequence_length)
+    input_ids = torch.masked_fill(query_responses, ~attention_mask, 0)
+    outputs = []
+    for lm_backbone in lm_backbones:
+        output = lm_backbone(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            return_dict=True,
+            output_hidden_states=True,
+            use_cache=False,  # otherwise mistral-based RM would error out
+        )
+        outputs.append(output)
+    
+    reward_logits_list = []
+    for model, output in zip(models, outputs):
+        if hasattr(model, 'module'):
+            reward_logits = model.module.score(output.hidden_states[-1])
+        else:
+            reward_logits = model.score(output.hidden_states[-1])  # (batch_size, sequence_length)
+        reward_logits_list.append(reward_logits)
+
+    # Calculate the length of each sequence by finding the first occurrence of a padding token after the context
+    # sequence_lengths shape: (batch_size,)
+    sequence_lengths = first_true_indices(query_responses[:, context_length:] == pad_token_id) - 1 + context_length
+    for reward_logits in reward_logits_list:
+        assert (
+            reward_logits.shape[-1] == 1
+        ), "Reward model should output a single scalar per token. Check if you added `num_labels=1` when doing `AutoModelForSequenceClassification.from_pretrained(...)`."
+        # https://github.com/huggingface/transformers/blob/dc68a39c8111217683bf49a4912d0c9018bab33d/src/transformers/models/gpt2/modeling_gpt2.py#L1454
+    
+    stacked_reward_logits = torch.stack(reward_logits_list)
+    weights = torch.tensor(weights).view(-1, 1, 1, 1).to(stacked_reward_logits.device)
+    weighted_matrices = stacked_reward_logits * weights
+    reward_logits = weighted_matrices.sum(dim = 0)
+
+    # Return the reward logits for all tokens, the final reward scores for each sequence, and the sequence lengths
+    return (
+        # reward_logits shape: (batch_size, sequence_length)
+        reward_logits,
+        # final_scores shape: (batch_size,)
+        reward_logits[
+            torch.arange(reward_logits.size(0), device=reward_logits.device),
+            sequence_lengths,
+        ].squeeze(
+            -1
+        ),  # Shape: (batch_size,)
+        sequence_lengths,
+        [logits[
+            torch.arange(reward_logits.size(0), device=reward_logits.device),
+            sequence_lengths,
+        ].squeeze(
+            -1
+        ) for logits in reward_logits_list],
+    )
+
+    return (
+        reward_logits,
+        reward_logits[
+            torch.arange(reward_logits.size(0), device = reward_logits.device),
+            sequence_lengths,
+        ].squeeze(-1),
+        sequence_lengths
+    )
 
 def forward(
     model: torch.nn.Module,
