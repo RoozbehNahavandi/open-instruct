@@ -2,59 +2,172 @@
 export CUDA_VISIBLE_DEVICES=0
 
 
-# Evaluating llama 7B model using chain-of-thought
+# # Evaluating llama 7B model using chain-of-thought
+# python -m eval.MATH.run_eval \
+#     --data_dir data/eval/MATH/ \
+#     --max_num_examples 200 \
+#     --save_dir results/MATH/llama-7B-cot-4shot \
+#     --model ../hf_llama2_models/7B \
+#     --tokenizer ../hf_llama2_models/7B \
+#     --n_shot 4 \
+#     --use_vllm
+# echo "Finished evaluation on llama2 (CoT)"
+
+
+# # Evaluating llama 7B model using direct answering (no chain-of-thought)
+# python -m eval.MATH.run_eval \
+#     --data_dir data/eval/MATH/ \
+#     --max_num_examples 200 \
+#     --save_dir results/gsm/llama-7B-no-cot-4shot \
+#     --model ../hf_llama2_models/7B \
+#     --tokenizer ../hf_llama2_models/7B \
+#     --n_shot 4 \
+#     --no_cot \
+#     --use_vllm
+
+# echo "Finished evaluation on llama2 (no CoT)"
+
+
+# # Evaluating llama 7B finetuned model using chain-of-thought
+# python -m eval.MATH.run_eval \
+#     --data_dir data/eval/MATH/ \
+#     --max_num_examples 200 \
+#     --save_dir results/MATH/llama-7B-cot-4shot \
+#     --model output/tulu_v2_7B \
+#     --tokenizer output/tulu_v2_7B \
+#     --n_shot 4 \
+#     --use_vllm
+
+# echo "Finished evaluation on finetuned llama2 (CoT)"
+
+
+# # Evaluating llama 7B finetuned model using direct answering (no chain-of-thought)
+# python -m eval.MATH.run_eval \
+#     --data_dir data/eval/MATH/ \
+#     --max_num_examples 200 \
+#     --save_dir results/gsm/llama-7B-no-cot-4shot \
+#     --model output/tulu_v2_7B \
+#     --tokenizer output/tulu_v2_7B \
+#     --n_shot 4 \
+#     --no_cot \
+#     --use_vllm
+
+# echo "Finished evaluation on finetuned llama2 (no CoT)"
+
+
+# # Evaluating allenai/tulu-2-7b model using chain-of-thought
+# python -m eval.MATH.run_eval \
+#     --data_dir data/eval/MATH/ \
+#     --max_num_examples 200 \
+#     --save_dir results/MATH/llama-7B-cot-4shot \
+#     --model allenai/tulu-2-7b \
+#     --tokenizer allenai/tulu-2-7b \
+#     --n_shot 4 \
+#     --use_vllm
+
+# echo "Finished evaluation on allenai/tulu-2-7b (CoT)"
+
+
+# # Evaluating allenai/tulu-2-7b model using direct answering (no chain-of-thought)
+# python -m eval.MATH.run_eval \
+#     --data_dir data/eval/MATH/ \
+#     --max_num_examples 200 \
+#     --save_dir results/gsm/llama-7B-no-cot-4shot \
+#     --model allenai/tulu-2-7b \
+#     --tokenizer allenai/tulu-2-7b \
+#     --n_shot 4 \
+#     --no_cot \
+#     --use_vllm
+
+# echo "Finished evaluation on allenai/tulu-2-7b (no CoT)"
+
+
+
+
+
+# Evaluating output/dpo_7b_recreate2 model using chain-of-thought
 python -m eval.MATH.run_eval \
     --data_dir data/eval/MATH/ \
     --max_num_examples 200 \
     --save_dir results/MATH/llama-7B-cot-4shot \
-    --model ../hf_llama_models/7B \
-    --tokenizer ../hf_llama_models/7B \
+    --model output/dpo_7b_recreate2 \
+    --tokenizer output/dpo_7b_recreate2 \
     --n_shot 4 \
     --use_vllm
-echo "Finished evaluation on finetuned llama2 (CoT)"
+
+echo "Finished evaluation on output/dpo_7b_recreate2 (CoT)"
 
 
-# Evaluating llama 7B model using direct answering (no chain-of-thought)
+# Evaluating output/dpo_7b_recreate2b model using direct answering (no chain-of-thought)
 python -m eval.MATH.run_eval \
     --data_dir data/eval/MATH/ \
     --max_num_examples 200 \
     --save_dir results/gsm/llama-7B-no-cot-4shot \
-    --model ../hf_llama_models/7B \
-    --tokenizer ../hf_llama_models/7B \
+    --model output/dpo_7b_recreate2 \
+    --tokenizer output/dpo_7b_recreate2 \
     --n_shot 4 \
     --no_cot \
     --use_vllm
 
-echo "Finished evaluation on finetuned llama2 (no CoT)"
+echo "Finished evaluation on output/dpo_7b_recreate2 (no CoT)"
 
 
-# Evaluating llama 7B finetuned model using chain-of-thought
+
+# Evaluating output/dpo_7b_lora_merged model using chain-of-thought
 python -m eval.MATH.run_eval \
     --data_dir data/eval/MATH/ \
     --max_num_examples 200 \
     --save_dir results/MATH/llama-7B-cot-4shot \
-    --model output/tulu_v2_7B/checkpoint \
-    --tokenizer output/tulu_v2_7B/checkpoint \
+    --model output/dpo_7b_lora_merged \
+    --tokenizer output/dpo_7b_lora_merged \
     --n_shot 4 \
     --use_vllm
 
-echo "Finished evaluation on finetuned llama2 (CoT)"
+echo "Finished evaluation on output/dpo_7b_lora_merged (CoT)"
 
 
-# Evaluating llama 7B finetuned model using direct answering (no chain-of-thought)
+# Evaluating output/dpo_7b_lora_merged model using direct answering (no chain-of-thought)
 python -m eval.MATH.run_eval \
     --data_dir data/eval/MATH/ \
     --max_num_examples 200 \
     --save_dir results/gsm/llama-7B-no-cot-4shot \
-    --model output/tulu_v2_7B/checkpoint \
-    --tokenizer output/tulu_v2_7B/checkpoint \
+    --model output/dpo_7b_lora_merged \
+    --tokenizer output/dpo_7b_lora_merged \
     --n_shot 4 \
     --no_cot \
     --use_vllm
 
-echo "Finished evaluation on finetuned llama2 (no CoT)"
+echo "Finished evaluation on output/dpo_7b_lora_merged (no CoT)"
 
 
+
+# Evaluating output/dpo_7b_lora_merged2 model using chain-of-thought
+python -m eval.MATH.run_eval \
+    --data_dir data/eval/MATH/ \
+    --max_num_examples 200 \
+    --save_dir results/MATH/llama-7B-cot-4shot \
+    --model output/dpo_7b_lora_merged2 \
+    --tokenizer output/dpo_7b_lora_merged2 \
+    --n_shot 4 \
+    --use_vllm
+
+echo "Finished evaluation on output/dpo_7b_lora_merged2 (CoT)"
+
+
+# Evaluating output/dpo_7b_lora_merged2 model using direct answering (no chain-of-thought)
+python -m eval.MATH.run_eval \
+    --data_dir data/eval/MATH/ \
+    --max_num_examples 200 \
+    --save_dir results/gsm/llama-7B-no-cot-4shot \
+    --model output/dpo_7b_lora_merged2 \
+    --tokenizer output/dpo_7b_lora_merged2 \
+    --n_shot 4 \
+    --no_cot \
+    --use_vllm
+
+echo "Finished evaluation on output/dpo_7b_lora_merged2 (no CoT)"
+
+# --------------------------------------------- #
 
 # # Evaluating tulu 7B model using chain-of-thought and chat format
 # python -m eval.MATH.run_eval \

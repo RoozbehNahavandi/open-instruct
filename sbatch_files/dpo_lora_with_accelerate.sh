@@ -1,7 +1,8 @@
 # you need 8 GPUs for full finetuning
 export CUDA_VISIBLE_DEVICES=0,1,2,3
 
-NUM_GPUS=2
+MODEL_SIZE=7B
+NUM_GPUS=4
 BATCH_SIZE_PER_GPU=1
 TOTAL_BATCH_SIZE=32
 GRADIENT_ACC_STEPS=$(($TOTAL_BATCH_SIZE/$NUM_GPUS/$BATCH_SIZE_PER_GPU))
@@ -30,8 +31,18 @@ accelerate launch \
     --weight_decay 0. \
     --num_train_epochs 3 \
     --checkpointing_steps 500 \
-    --output_dir output/dpo_7b_recreate2_lora_2gpu \
+    --output_dir output/dpo_7b_recreate2_lora \
     --with_tracking \
     --report_to wandb \
     --wandb_entity roozbeh-n99 \
-    --logging_steps 1 
+    --logging_steps 1 \
+    --use_lora \
+    --lora_rank 64 \
+    --lora_alpha 16 \
+    --lora_dropout 0.1 \
+
+python open_instruct/merge_lora.py \
+    --base_model_name_or_path output/tulu_v2_7B \
+    --lora_model_name_or_path output/dpo_7b_recreate2_lora \
+    --output_dir output/dpo_7b_lora_merged2/ \
+    --save_tokenizer
