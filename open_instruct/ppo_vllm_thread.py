@@ -153,14 +153,16 @@ class Args:
     """the mini batch size across GPUs"""
     local_rollout_forward_batch_size: int = 64
     """per rank no grad forward pass in the rollout phase"""
-    reward_model_path: str = "EleutherAI/pythia-160m"
-    """the path to the reward model 1"""
-    reward_model2_path: str = None
-    """the path to the reward model 2"""
-    reward_model_revision: Optional[str] = None
-    """the revision of the reward model 1"""
-    reward_model2_revision: Optional[str] = None
-    """the revision of the reward model 2"""
+    reward_models_path: str = None
+    """the list of paths to the reward models"""
+    reward_models_revision: Optional[str] = None
+    """the revision of the reward models"""
+    value_model: str = "cleanrl/EleutherAI_pythia-1b-deduped__reward__tldr"
+    """the path to the value model"""
+    value_model_revision: Optional[str] = None
+    """the revision of the value model"""
+    rm_weights: str = None
+    """the list of weights for each reward model score"""
 
     # generation config
     response_length: int = 53
@@ -418,33 +420,10 @@ def masked_whiten(values: torch.Tensor, mask: torch.Tensor, shift_mean: bool = T
 
 
 
-
-def init_dist(args):
-    node_list = os.environ['SLURM_NODELIST']
-    num_gpus = torch.cuda.device_count()
-    args.global_rank = int(os.environ['SLURM_PROCID'])
-    args.local_rank = args.global_rank % num_gpus
-    # args.world_size = int(os.environ['SLURM_NTASKS'])
-    args.world_size = 8
-
-    os.environ['WORLD_SIZE'] = str(args.world_size)
-    os.environ['RANK'] = str(args.global_rank)
-    addr = os.environ['MASTER_ADDR']
-    port = os.environ['MASTER_PORT']
-    dist.init_process_group(backend='nccl')
-    torch.cuda.set_device(args.local_rank)
-    print(f"proc_id: {args.global_rank}; local_rank: {args.local_rank}; node_list: {node_list}; num_gpus: {num_gpus}; addr: {addr}; port: {port}")
-    print("CUDA available:", torch.cuda.is_available())
-    print("Number of GPUs:", torch.cuda.device_count())
-    return args
-
-
 def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
 
-    # init_dist(args)
     accelerator = calculate_runtime_args_and_accelerator(args, model_config)
     local_seed = args.seed + accelerator.process_index
-    subprocess.run(['nvidia-smi'], shell=True)
 
 
     # set up experiment tracking and seeds
@@ -548,34 +527,45 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
         use_cache=False,
     )
     value_model: PreTrainedModel = AutoModelForSequenceClassification.from_pretrained(
-        args.reward_model_path,
-        revision=args.reward_model_revision,
+        args.value_model,
+        revision=args.value_model_revision,
         num_labels=1,
         torch_dtype=torch.bfloat16,
         attn_implementation="flash_attention_2",
         use_cache=False,
     )
-    reward_model: PreTrainedModel = AutoModelForSequenceClassification.from_pretrained(
-        args.reward_model_path,
-        revision=args.reward_model_revision,
-        num_labels=1,
-        torch_dtype=torch.bfloat16,
-        attn_implementation="flash_attention_2",
-        use_cache=False,
-    )
+    # print(args.reward_models_path, args.rm_weights)
+    print(type(args.rm_weights))
+    print('77777' * 8)
 
-    if policy.config.vocab_size != reward_model.config.vocab_size:
-        raise ValueError(
-            "Policy and reward model must have the same vocab size. "
-            f"Policy: {policy.config.vocab_size}, Reward: {reward_model.config.vocab_size}. "
-            "If they don't have the same vocab size, the policy could generate tokens which "
-            "is going to cause index out of bound error in the reward model."
-        )
+    reward_models_list = args.reward_models_path.split(',')
+    print(f'reward models list: {reward_models_list}')
+    rm_weights = list(map(float, args.rm_weights.split(',')))
+    print(f'rm weights: {rm_weights}')
+    print('8888' * 10)
+
+    rm_list = [AutoModelForSequenceClassification.from_pretrained(
+        path,
+        revision=args.reward_models_revision,
+        num_labels=1,
+        torch_dtype=torch.bfloat16,
+        attn_implementation="flash_attention_2",
+        use_cache=False,
+    ) for path in reward_models_list]
+
+    for rm in rm_list:
+        if policy.config.vocab_size != rm.config.vocab_size:
+            raise ValueError(
+                "Policy and reward model must have the same vocab size. "
+                f"Policy: {policy.config.vocab_size}, Reward: {rm.config.vocab_size}. "
+                "If they don't have the same vocab size, the policy could generate tokens which "
+                "is going to cause index out of bound error in the reward model."
+            )
 
     model = PolicyAndValueWrapper(policy, value_model)
     if model_config.gradient_checkpointing:
         model.gradient_checkpointing_enable()
-    for module in [model, ref_model, reward_model]:
+    for module in [model, ref_model] + rm_list:
         disable_dropout_in_model(module)
     if args.stop_token:
         if args.stop_token == "eos":
@@ -651,11 +641,24 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
     # deepspeed setup
     is_deepspeed_enabled = getattr(accelerator.state, "deepspeed_plugin", None) is not None
     mixed_precision = accelerator.state.mixed_precision
+    # if is_deepspeed_enabled:
+    #     reward_model_1 = prepare_deepspeed(reward_model_1, args.per_device_train_batch_size, mixed_precision)
+    #     reward_model_2 = prepare_deepspeed(reward_model_2, args.per_device_train_batch_size, mixed_precision)
+    #     ref_model = prepare_deepspeed(ref_model, args.per_device_train_batch_size, mixed_precision)
+    # else:
+    #     reward_model_1 = reward_model_1.to(device)
+    #     reward_model_2 = reward_model_2.to(device)
+    #     ref_model = ref_model.to(device)
+
+    # Apply the appropriate setup to each model in the list
     if is_deepspeed_enabled:
-        reward_model = prepare_deepspeed(reward_model, args.per_device_train_batch_size, mixed_precision)
+        rm_list = [
+            prepare_deepspeed(model, args.per_device_train_batch_size, mixed_precision) 
+            for model in rm_list
+        ]
         ref_model = prepare_deepspeed(ref_model, args.per_device_train_batch_size, mixed_precision)
     else:
-        reward_model = reward_model.to(device)
+        rm_list = [model.to(device) for model in rm_list]
         ref_model = ref_model.to(device)
 
     # online generation config
@@ -715,6 +718,7 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
     entropy_stats = torch.zeros(stats_shape, device=device)
     ratio_stats = torch.zeros(stats_shape, device=device)
     local_metrics = torch.zeros((20,), device=device)
+    local_metrics_rm = torch.zeros((len(rm_list), ), device = device)
     episode = args.batch_size * (resume_training_step - 1)
     model.train()
 
@@ -777,6 +781,9 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
                 logprobs = []
                 ref_logprobs = []
                 scores = []
+                rm_scores = {}
+                for rm_idx, _ in enumerate(rm_list):
+                    rm_scores[rm_idx] = []
                 sequence_lengths = []
                 values = []
                 if accelerator.is_main_process:
@@ -828,11 +835,10 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
                         )
 
                     # Response Processing 2. run reward model on the truncated responses
-                    reward_models = [reward_model, reward_model]
                     postprocessed_query_response = torch.cat((query, postprocessed_response), 1)
                     sequence_length = first_true_indices(postprocessed_response == tokenizer.pad_token_id) - 1
-                    _, score, _ = get_reward(
-                        reward_model, postprocessed_query_response, tokenizer.pad_token_id, context_length
+                    _, score, _, rm_values = get_multiple_reward(
+                        rm_list, postprocessed_query_response, tokenizer.pad_token_id, context_length, weights = rm_weights
                     )
                     unwrapped_value_model = accelerator.unwrap_model(model).value_model
                     full_value, _, _ = get_reward(
@@ -848,6 +854,9 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
                     ref_logprobs.append(ref_logprob)
                     sequence_lengths.append(sequence_length)
                     scores.append(score)
+                    for rm_idx, score_iter in enumerate(rm_values):
+                        rm_scores[rm_idx].append(score_iter)
+
                     values.append(value)
                 responses = torch.cat(responses, 0)
                 postprocessed_responses = torch.cat(postprocessed_responses, 0)
@@ -855,12 +864,16 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
                 ref_logprobs = torch.cat(ref_logprobs, 0)
                 sequence_lengths = torch.cat(sequence_lengths, 0)
                 scores = torch.cat(scores, 0)
+
+                for key in rm_scores:
+                    rm_scores[key] = torch.cat(rm_scores[key], 0)
+ 
                 global_scores = accelerator.gather(scores)
+                # global_scores1 = accelerator.gather(scores1)
+                # global_scores2 = accelerator.gather(scores2)
                 accelerator.print(f"global_scores: {global_scores}, {global_scores.mean()}")
                 values = torch.cat(values, 0)
-                print(f'responses.shape: {responses.shape}, postprocessed_responses.shape: {postprocessed_responses.shape}')
-                print(f'values.shape: {values.shape}')
-                del (logprob, ref_logprob, full_value, value, score)
+                del (logprob, ref_logprob, full_value, value, score, rm_values)
                 gc.collect()
                 torch.cuda.empty_cache()
 
@@ -875,6 +888,14 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
                     scores = torch.where(
                         contain_stop_token, scores, torch.full_like(scores, args.penalty_reward_value)
                     )
+
+                    for rm_idx in rm_scores:
+                        score_value = rm_scores[rm_idx]
+                        score_value = torch.where(
+                            contain_stop_token, score_value, torch.full_like(score_value, args.penalty_reward_value)
+                        )
+                        rm_scores[rm_idx] = score_value
+
 
                 # be very careful with `padding_mask_p1`; see https://excalidraw.com/#json=LWnzG4w2k5DjF_EOL_xPt,e2w3a-hFJ_gX5vOfeyXGTw
                 response_idxs = torch.arange(responses.shape[1], device=responses.device).repeat(responses.shape[0], 1)
@@ -908,7 +929,6 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
                 if args.whiten_rewards:
                     rewards = masked_whiten(rewards, mask=~padding_mask_p1, shift_mean=False)
                     rewards = torch.masked_fill(rewards, padding_mask_p1, 0)
-                print(f'rewards.shape: {rewards.shape}')
 
                 # 6. compute advantages and returns
                 lastgaelam = 0
@@ -921,8 +941,6 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
                     advantages_reversed.append(lastgaelam)
                 advantages = torch.stack(advantages_reversed[::-1], axis=1)
                 returns = advantages + values
-                print(f'advantages.shape: {advantages.shape}, returns.shape: {returns.shape}, ')
-
                 advantages = masked_whiten(advantages, ~padding_mask)
                 advantages = torch.masked_fill(advantages, padding_mask, 0)
                 torch.cuda.empty_cache()
@@ -971,7 +989,6 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
                         pg_loss = masked_mean(pg_loss_max, ~padding_mask[micro_batch_inds])
                         loss = pg_loss + args.vf_coef * vf_loss
 
-                        # subprocess.run(['nvidia-smi'], shell=True)
 
                         # global_rank = accelerator.process_index
                         # local_rank = accelerator.local_process_index
@@ -1032,6 +1049,10 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
             local_metrics[14] = ratio_stats.var()
             local_metrics[15] = ((kl) ** 2 / 2).sum(1).mean()
             local_metrics[16] = ((-kl).exp() - 1 + kl).sum(1).mean()
+
+            for idx, rm_idx in enumerate(rm_scores):
+                local_metrics_rm[idx] = rm_scores[rm_idx].mean()
+
             global_metrics = accelerator.reduce(local_metrics, reduction="mean").tolist()
             metrics = {
                 "episode": episode,
@@ -1044,7 +1065,7 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
                 "val/num_stop_token_ids": global_metrics[1],
                 "objective/kl": global_metrics[2],
                 "objective/kl2": global_metrics[15],
-                "ojbective/kl3": global_metrics[16],
+                "objective/kl3": global_metrics[16],
                 "objective/entropy": global_metrics[3],
                 "objective/non_score_reward": global_metrics[4],
                 "objective/rlhf_reward": global_metrics[5],
@@ -1058,6 +1079,9 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
                 "val/ratio": global_metrics[13],
                 "val/ratio_var": global_metrics[14],
             }
+            for rm_idx, local_metric_rm in enumerate(local_metrics_rm):
+                metrics[f'reward_models/RM_{rm_idx}'] = local_metric_rm
+
             if accelerator.is_main_process:
                 print_rich_single_line_metrics(metrics)
                 for key, value in metrics.items():
@@ -1066,13 +1090,6 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
         del (metrics, kl, non_score_reward, rlhf_reward)
         gc.collect()
         torch.cuda.empty_cache()
-        # if training_step % 5 == 0:
-        #     print(f'training_step: {training_step}')
-        # if not training_step % 10:
-        #     output_dir = f"step_{training_step}"
-        #     if args.checkpoint_output_dir is not None:
-        #         output_dir = os.path.join(args.checkpoint_output_dir, output_dir)
-        #     accelerator.save_state(output_dir)
 
     if not ph.preemptied:
         # save model
@@ -1080,7 +1097,6 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
         original_tokenizer = AutoTokenizer.from_pretrained(
             model_config.model_name_or_path, revision=model_config.model_revision
         )
-        print(f'Saving the model to {args.output_dir}')
         save_with_accelerate(
             accelerator,
             model,
@@ -1138,10 +1154,11 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
                 args.hf_repo_id,
                 args.hf_repo_revision,
             )
-        # if accelerator.is_main_process:
-        #     # remove args.checkpoint_output_dir
-        #     if os.path.exists(args.checkpoint_output_dir):
-        #         shutil.rmtree(args.checkpoint_output_dir, ignore_errors=True)
+
+        if accelerator.is_main_process:
+            # remove args.checkpoint_output_dir
+            if os.path.exists(args.checkpoint_output_dir):
+                shutil.rmtree(args.checkpoint_output_dir, ignore_errors=True)
 
 
 if __name__ == "__main__":
