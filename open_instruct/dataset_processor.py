@@ -52,6 +52,8 @@ ATTENTION_MASK_REJECTED_KEY = "attention_mask_rejected"
 INPUT_IDS_PROMPT_KEY = "input_ids_prompt"
 ATTENTION_MASK_PROMPT_KEY = "attention_mask_prompt"
 
+
+
 # NOTE (Costa): the `INPUT_IDS_PROMPT_KEY` is just for visualization purposes only
 # also we don't really need `ATTENTION_MASK_CHOSEN_KEY` and `ATTENTION_MASK_REJECTED_KEY`
 # since we are always padding from the right with a collator; however they might become
@@ -362,6 +364,8 @@ class PreferenceDatasetProcessor(DatasetProcessor):
 class SFTDatasetProcessor(DatasetProcessor):
     def tokenize(self, dataset: Dataset):
         def tokenize_fn(row):
+            # print(f'sft_messages_key: {self.config.sft_messages_key}')
+
             row[INPUT_IDS_PROMPT_KEY] = self.tokenizer.apply_chat_template(
                 row[self.config.sft_messages_key][:-1],
                 add_generation_prompt=True,
@@ -477,6 +481,124 @@ class SimplePreferenceCollator:
         }
 
 
+class SimplePreferenceGenerateCollator:
+    """Simple collator for generation task (always pad from the LEFT)"""
+
+    def __init__(self, pad_token_id: int):
+        self.pad_token_id = pad_token_id
+
+    def __call__(self, batch: list[dict]):
+        """the input will have input_ids_prompt"""
+        # Find max length in the batch
+        max_length_generate = -1
+        max_length_chosen = -1
+        max_length_rejected = -1
+        for i in range(len(batch)):
+            max_length_generate = max(max_length_generate, len(batch[i][INPUT_IDS_PROMPT_KEY]))
+            max_length_chosen = max(max_length_chosen, len(batch[i]['chosen']))
+            max_length_rejected = max(max_length_rejected, len(batch[i]['rejected']))
+
+
+        max_length = max(max_length_chosen, max_length_rejected, max_length_generate)
+        assert max_length > 0, "the dataset is empty"
+
+        # Initialize lists to store padded sequences and attention masks
+        padded_sequences_generate = []
+        padded_sequences_chosen = []
+        padded_sequences_rejected = []
+
+        for i in range(len(batch)):
+            # Calculate padding length
+            pad_length_generate = max_length - len(batch[i][INPUT_IDS_PROMPT_KEY])
+            # pad_length_chosen = max_length - len(batch[i]['chosen'])
+            # pad_length_rejected = max_length - len(batch[i]['rejected'])
+
+            # Pad from the right
+            padding_generate = [self.pad_token_id] * pad_length_generate
+            # padding_chosen = [self.pad_token_id] * pad_length_chosen
+            # padding_rejected = [self.pad_token_id] * pad_length_rejected
+            # padded_sequence_chosen = batch[i][INPUT_IDS_CHOSEN_KEY] + padding_chosen
+            # padded_sequence_rejected = batch[i][INPUT_IDS_REJECTED_KEY] + padding_rejected
+            padded_sequence_generate = padding_generate + batch[i][INPUT_IDS_PROMPT_KEY]
+
+
+            padded_sequences_chosen.append(batch[i]['chosen'])
+            padded_sequences_rejected.append(batch[i]['rejected'])
+            padded_sequences_generate.append(padded_sequence_generate)
+
+
+        # Convert to tensors
+        padded_sequences_generate = torch.tensor(padded_sequences_generate)
+
+
+        return {
+            INPUT_IDS_PROMPT_KEY: padded_sequences_generate,
+            'chosen': padded_sequences_chosen,
+            'rejected': padded_sequences_rejected,
+        }
+    
+
+class DDSimplePreferenceGenerateCollator:
+    """Simple collator for generation task (always pad from the LEFT)"""
+
+    def __init__(self, pad_token_id: int):
+        self.pad_token_id = pad_token_id
+
+    def __call__(self, batch: list[dict]):
+        """the input will have input_ids_prompt"""
+        # Find max length in the batch
+        max_length_generate = -1
+        max_length_chosen = -1
+        max_length_rejected = -1
+        for i in range(len(batch)):
+            max_length_generate = max(max_length_generate, len(batch[i][INPUT_IDS_PROMPT_KEY]))
+            max_length_chosen = max(max_length_chosen, len(batch[i]['chosen']))
+            max_length_rejected = max(max_length_rejected, len(batch[i]['rejected']))
+
+
+        max_length = max(max_length_chosen, max_length_rejected, max_length_generate)
+        assert max_length > 0, "the dataset is empty"
+
+        # Initialize lists to store padded sequences and attention masks
+        padded_sequences_generate = []
+        padded_sequences_chosen = []
+        padded_sequences_rejected = []
+        meta_data = []
+
+        for i in range(len(batch)):
+            # Calculate padding length
+            pad_length_generate = max_length - len(batch[i][INPUT_IDS_PROMPT_KEY])
+            # pad_length_chosen = max_length - len(batch[i]['chosen'])
+            # pad_length_rejected = max_length - len(batch[i]['rejected'])
+
+            # Pad from the right
+            padding_generate = [self.pad_token_id] * pad_length_generate
+            # padding_chosen = [self.pad_token_id] * pad_length_chosen
+            # padding_rejected = [self.pad_token_id] * pad_length_rejected
+            # padded_sequence_chosen = batch[i][INPUT_IDS_CHOSEN_KEY] + padding_chosen
+            # padded_sequence_rejected = batch[i][INPUT_IDS_REJECTED_KEY] + padding_rejected
+            padded_sequence_generate = padding_generate + batch[i][INPUT_IDS_PROMPT_KEY]
+
+
+            padded_sequences_chosen.append(batch[i]['chosen'])
+            padded_sequences_rejected.append(batch[i]['rejected'])
+            padded_sequences_generate.append(padded_sequence_generate)
+            meta_data.append(batch[i]['meta_data'])
+
+
+        # Convert to tensors
+        padded_sequences_generate = torch.tensor(padded_sequences_generate)
+
+
+        return {
+            INPUT_IDS_PROMPT_KEY: padded_sequences_generate,
+            'chosen': padded_sequences_chosen,
+            'rejected': padded_sequences_rejected,
+            'meta_data': meta_data
+        }
+    
+
+
 class SimpleGenerateCollator:
     """Simple collator for generation task (always pad from the LEFT)"""
 
@@ -509,6 +631,8 @@ class SimpleGenerateCollator:
         return {
             INPUT_IDS_PROMPT_KEY: padded_sequences,
         }
+    
+
 
 
 if __name__ == "__main__":

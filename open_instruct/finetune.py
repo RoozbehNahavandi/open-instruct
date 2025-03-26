@@ -335,7 +335,7 @@ class FlatArguments:
         default=0.5,
         metadata={"help": "Weight for load balancing loss if applicable."},
     )
-    push_to_hub: bool = True
+    push_to_hub: bool = False
     """Whether to upload the saved model to huggingface"""
     hf_entity: Optional[str] = None
     """The user or org name of the model repository from the Hugging Face Hub"""
@@ -350,31 +350,31 @@ class FlatArguments:
     hf_metadata_dataset: Optional[str] = "allenai/tulu-3-evals"
     """What dataset to upload the metadata to. If unset, don't upload metadata"""
 
-    def __post_init__(self):
-        if self.reduce_loss not in ["mean", "sum"]:
-            raise ValueError("reduce_loss must be either 'mean' or 'sum'")
-        if (
-            self.dataset_name is None
-            and self.train_file is None
-            and self.dataset_mixer is None
-            and self.dataset_mixer_list is None
-        ):
-            raise ValueError("Need either a dataset name, dataset mixer, or a training file.")
-        else:
-            if self.train_file is not None:
-                extension = self.train_file.split(".")[-1]
-                assert extension in ["json", "jsonl"], "`train_file` should be a json or a jsonl file."
-        if (
-            (self.dataset_name is not None and (self.dataset_mixer is not None or self.dataset_mixer_list is not None))
-            or (self.dataset_name is not None and self.train_file is not None)
-            or (
-                (self.dataset_mixer is not None or self.dataset_mixer_list is not None) and self.train_file is not None
-            )
-            or (self.dataset_mixer is not None and self.dataset_mixer_list is not None)
-        ):
-            raise ValueError("Cannot provide two dataset selection mechanisms.")
-        if self.try_launch_beaker_eval_jobs and not self.push_to_hub:
-            raise ValueError("Cannot launch Beaker evaluation jobs without pushing to the Hub.")
+    # def __post_init__(self):
+    #     if self.reduce_loss not in ["mean", "sum"]:
+    #         raise ValueError("reduce_loss must be either 'mean' or 'sum'")
+    #     if (
+    #         self.dataset_name is None
+    #         and self.train_file is None
+    #         and self.dataset_mixer is None
+    #         and self.dataset_mixer_list is None
+    #     ):
+    #         raise ValueError("Need either a dataset name, dataset mixer, or a training file.")
+    #     else:
+    #         if self.train_file is not None:
+    #             extension = self.train_file.split(".")[-1]
+    #             assert extension in ["json", "jsonl"], "`train_file` should be a json or a jsonl file."
+    #     if (
+    #         (self.dataset_name is not None and (self.dataset_mixer is not None or self.dataset_mixer_list is not None))
+    #         or (self.dataset_name is not None and self.train_file is not None)
+    #         or (
+    #             (self.dataset_mixer is not None or self.dataset_mixer_list is not None) and self.train_file is not None
+    #         )
+    #         or (self.dataset_mixer is not None and self.dataset_mixer_list is not None)
+    #     ):
+    #         raise ValueError("Cannot provide two dataset selection mechanisms.")
+    #     if self.try_launch_beaker_eval_jobs and not self.push_to_hub:
+    #         raise ValueError("Cannot launch Beaker evaluation jobs without pushing to the Hub.")
 
 
 def encode_sft_example(example, tokenizer, max_seq_length):
@@ -576,18 +576,31 @@ def main(args: FlatArguments):
             use_fast=not args.use_slow_tokenizer,
         )
     elif args.model_name_or_path:
-        tokenizer = AutoTokenizer.from_pretrained(
-            args.model_name_or_path,
-            revision=tokenizer_revision,
-            trust_remote_code=args.trust_remote_code,
-            use_fast=not args.use_slow_tokenizer,
-        )
+        if 'llama' in args.model_name_or_path and False:
+            print('Using LlamaTokenizer')
+            tokenizer = LlamaTokenizer.from_pretrained(
+                args.model_name_or_path,
+                revision=tokenizer_revision,
+                trust_remote_code=args.trust_remote_code,
+            )
+        else:
+            print(not args.use_slow_tokenizer, 'args.use_slow_tokenizer')
+            tokenizer = AutoTokenizer.from_pretrained(
+                args.model_name_or_path,
+                revision=tokenizer_revision,
+                trust_remote_code=True,
+                use_fast=False,
+            )
     else:
         raise ValueError(
             "You are instantiating a new tokenizer from scratch. This is not supported by this script."
             "You can do it from another script, save it, and load it from here, using --tokenizer_name."
         )
 
+    tokenizer.pad_token = tokenizer.eos_token
+
+    # Verify the pad token
+    print("Padding token:", tokenizer.pad_token)
     if args.model_name_or_path:
         if args.use_qlora:
             bnb_config = BitsAndBytesConfig(

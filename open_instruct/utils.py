@@ -454,6 +454,10 @@ def combine_dataset(
             try:
                 # Try first if dataset on a Hub repo
                 dataset = load_dataset(ds, ds_config, split=split)
+<<<<<<< HEAD
+=======
+
+>>>>>>> recovery
             except DatasetGenerationError:
                 # If not, check local dataset
                 dataset = load_from_disk(os.path.join(ds, split))
@@ -490,7 +494,11 @@ def combine_dataset(
         # remove id column
         if "id" in datasets.column_names:
             datasets = datasets.remove_columns("id")
+<<<<<<< HEAD
 
+=======
+    print(f'combine_dataset function: dataset.column_names: {dataset.column_names}')
+>>>>>>> recovery
     return datasets
 
 

@@ -7,6 +7,7 @@ token_length.png
 results
 models
 wandb
+sbatch_files/*
 data/*
 logs/*
 # !data/processed

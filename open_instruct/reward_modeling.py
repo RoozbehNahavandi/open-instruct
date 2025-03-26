@@ -131,7 +131,11 @@ class Args:
     """The wandb's project name"""
     wandb_entity: Optional[str] = None
     """The entity (team) of wandb's project"""
+<<<<<<< HEAD
     push_to_hub: bool = True
+=======
+    push_to_hub: bool = False
+>>>>>>> recovery
     """Whether to upload the saved model to huggingface"""
     hf_entity: Optional[str] = None
     """The user or org name of the model repository from the Hugging Face Hub"""
@@ -198,6 +202,7 @@ def layer_init(layer: nn.Module, std: float):
     return layer
 
 
+<<<<<<< HEAD
 def init_dist(args):
     node_list = os.environ['SLURM_NODELIST']
     num_gpus = torch.cuda.device_count()
@@ -221,6 +226,13 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
 
     accelerator = calculate_runtime_args_and_accelerator(args, model_config)
     subprocess.run(['nvidia-smi'], shell=True)
+=======
+def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
+    # Enable multi-node training
+
+    accelerator = calculate_runtime_args_and_accelerator(args, model_config)
+    # subprocess.run(['nvidia-smi'], shell=True)
+>>>>>>> recovery
     print('after initializing accelerate.')
 
     local_seed = args.seed + accelerator.process_index
@@ -278,6 +290,10 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
         splits=args.dataset_train_splits,
         columns_to_keep=[dataset_config.preference_chosen_key, dataset_config.preference_rejected_key],
     )
+<<<<<<< HEAD
+=======
+    print(f'train_dataset: {train_dataset}')
+>>>>>>> recovery
     if dataset_config.sanity_check:
         train_dataset = train_dataset.select(
             range(0, min(len(train_dataset), dataset_config.sanity_check_max_samples))
@@ -378,7 +394,11 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
                 rejected_reward = predicted_reward[data[INPUT_IDS_CHOSEN_KEY].shape[0] :]
                 accuracy = (chosen_reward > rejected_reward).float().mean()
                 loss = -F.logsigmoid(chosen_reward - rejected_reward).mean()
+<<<<<<< HEAD
                 subprocess.run(['nvidia-smi'], shell=True)
+=======
+                # subprocess.run(['nvidia-smi'], shell=True)
+>>>>>>> recovery
 
                 accelerator.backward(loss)
                 optimizer.step()

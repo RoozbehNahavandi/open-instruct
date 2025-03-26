@@ -20,6 +20,12 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import List, Literal, Optional, Tuple, Union
 import os
+<<<<<<< HEAD
+=======
+from abc import abstractclassmethod
+import random
+from datasets import load_dataset
+>>>>>>> recovery
 
 try:
     import deepspeed
@@ -38,10 +44,93 @@ from rich.panel import Panel
 from rich.table import Table
 from torch.nn.parallel.distributed import DistributedDataParallel
 from transformers import PreTrainedModel, PreTrainedTokenizer
+<<<<<<< HEAD
+=======
+from typing import Any, List, Dict
+>>>>>>> recovery
 
 from open_instruct.utils import retry_on_exception
 
 
+<<<<<<< HEAD
+=======
+@dataclass(init=True)
+class Sample:
+    id: str
+    prompt_or_input_text: str
+    references: List[str]
+    meta_data: Dict[str, Any] = None
+
+
+
+class TextGenPool:
+    def __init__(self, samples: List[Sample]):
+        self._samples = samples
+
+    def __len__(self):
+        return len(self._samples)
+
+    def __getitem__(self, ix: int) -> Sample:
+        if ix >= len(self):
+            raise StopIteration
+        sample = self._samples[ix]
+        return sample, 1.0
+
+    def sample(self) -> Sample:
+        random_sample = random.choice(self._samples)
+        return random_sample
+
+    @abstractclassmethod
+    def prepare(cls, **args) -> 'TextGenPool':
+        """
+        A factory method to instantiate data pool
+        """
+        raise NotImplementedError
+
+    def split(self, split_ratios: List[float]) -> List['TextGenPool']:
+        start_ix = 0
+        pools = []
+        for ratio in split_ratios:
+            count = int(len(self) * ratio)
+            end_ix = start_ix + count
+            pools.append(type(self)(self._samples[start_ix: end_ix]))
+            start_ix = end_ix
+        return pools
+
+
+
+class DailyDialog(TextGenPool):
+    EOU_TOKEN = "<EOU>"
+    @classmethod
+    def prepare(cls, split: str, context_size: int):
+        dataset = load_dataset("daily_dialog", split=split, keep_in_memory=True)
+        samples = []
+        utterance_id = 0
+        for item in dataset:
+            contexts = []
+            for utterance, emotion, intent in zip(item["dialog"],
+                                                  item["emotion"],
+                                                  item["act"]):
+                if len(contexts) >= context_size:
+                    context = DailyDialog.EOU_TOKEN.join(contexts[-context_size:]) 
+                    context += " " + DailyDialog.EOU_TOKEN
+                    target = utterance + DailyDialog.EOU_TOKEN
+                    sample = Sample(id=utterance_id, 
+                                    prompt_or_input_text=context, 
+                                    references=[target],
+                                    meta_data={
+                                        "emotion": [emotion],
+                                        "intent": [intent]
+                                    })
+                    samples.append(sample)
+                contexts.append(utterance)
+                utterance_id += 1
+
+        dp_instance = cls(samples)
+        return dp_instance
+
+
+>>>>>>> recovery
 @dataclass
 class ModelConfig:
     model_name_or_path: Optional[str] = None
@@ -137,6 +226,11 @@ def first_true_indices(bools: torch.Tensor, dtype=torch.long) -> torch.Tensor:
     return torch.min(zero_or_index, dim=-1).values
 
 
+<<<<<<< HEAD
+=======
+
+
+>>>>>>> recovery
 def get_reward(
     model: torch.nn.Module, query_responses: torch.Tensor, pad_token_id: int, context_length: int, weights: List[int] = [1]
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -212,7 +306,234 @@ def get_reward(
         sequence_lengths,
     )
 
+<<<<<<< HEAD
 
+=======
+def get_metric_value(
+    metric, 
+    tokenizer, 
+    generated_prompt_ids, 
+    chosen_responses, 
+    accelerator, 
+    queries, 
+    intent_flag=False, 
+    meteor_flag=False, 
+    meta_infos=None
+):
+    """
+    :param metric: The metric object (e.g., your "intent" metric or METEOR).
+    :param tokenizer: Your tokenizer for decoding token IDs.
+    :param generated_prompt_ids: A batch of token IDs. Shape could be (batch_size, seq_len).
+    :param chosen_responses: A batch of references (could be token IDs or already strings).
+    :param accelerator: Accelerator object with local_process_index and device info.
+    :param queries: A batch of prompt token IDs (if needed for your intent metric).
+    :param intent_flag: If True, compute your intent metric.
+    :param meteor_flag: If True, compute your METEOR metric.
+    :param meta_infos: Additional metadata you might need.
+    
+    :return: A tuple (scores_tensor, [scores_tensor]) 
+             (mirroring your original structure).
+    """
+
+    # 1. Batch-decode the entire batch of generated texts in one go
+    # This avoids a Python loop and is typically more efficient.
+    generated_texts = tokenizer.batch_decode(generated_prompt_ids, skip_special_tokens=True)
+    if intent_flag:
+        metric._device = accelerator.local_process_index
+        metric._model = metric._model.to(accelerator.local_process_index)
+
+        # 2. Batch-decode the entire batch of queries
+        prompt_texts = tokenizer.batch_decode(queries, skip_special_tokens=True)
+        # Optionally remove [PAD] if it's important to you
+        prompt_texts = [p.replace("[PAD]", "").strip() for p in prompt_texts]
+
+        # 3. Batch-decode chosen_responses if they are token IDs;
+        #    if they're already plain strings, just use them as-is.
+        if isinstance(chosen_responses[0], (list, tuple)):
+            reference_texts = tokenizer.batch_decode(chosen_responses, skip_special_tokens=True)
+        else:
+            reference_texts = chosen_responses
+
+        # 4. Compute your intent metric
+        #    The shape and keys of your returned metric dict may differ.
+        results = metric.compute(
+            prompt_texts=prompt_texts,
+            generated_texts=generated_texts,
+            reference_texts=reference_texts,
+            meta_infos=meta_infos
+        )
+        scores = results['intent/accuracy'][1]
+
+    elif meteor_flag:
+        # Batch-decode chosen_responses if they are token IDs
+        if isinstance(chosen_responses[0], (list, tuple)):
+            reference_texts = tokenizer.batch_decode(chosen_responses, skip_special_tokens=True)
+        else:
+            reference_texts = chosen_responses
+
+        # Compute METEOR on the entire batch
+        results = metric.compute(
+            prompt_texts=None,   # Not required for METEOR
+            generated_texts=generated_texts,
+            reference_texts=reference_texts,
+            meta_infos=meta_infos  # If needed by your metric
+        )
+        scores = results['lexical/meteor'][1]
+
+    else:
+        raise ValueError("You must set either intent_flag or meteor_flag to True.")
+    
+    # Convert to torch and place on accelerator device
+    scores_tensor = torch.tensor([scores]).to(accelerator.device)
+    return scores_tensor, [scores_tensor]
+
+def get_eval_score(eval_metric, tokenizer, generated_prompt_ids, chosen_responses, accelerator):
+    # If generated_prompt_ids is of shape [batch_size, seq_len],
+    # decode them all together:
+    generated_texts = tokenizer.batch_decode(generated_prompt_ids, skip_special_tokens=True)
+
+    # If chosen_responses are also token IDs, decode them similarly:
+    if isinstance(chosen_responses[0], (list, tuple, torch.Tensor)):
+        reference_texts = tokenizer.batch_decode(chosen_responses, skip_special_tokens=True)
+    else:
+        # Otherwise, assume chosen_responses is already a list of strings
+        reference_texts = chosen_responses
+
+    results = eval_metric.compute(
+        prompt_texts=None,
+        generated_texts=generated_texts,
+        reference_texts=reference_texts,
+        meta_infos=None,
+    )
+    eval_score = results['lexical/CRLHFEval_Score'][1]
+
+    eval_score_tensor = torch.tensor([eval_score]).to(accelerator.device)
+    return eval_score_tensor
+def get_reward2(
+    models: List[torch.nn.Module], query_responses: torch.Tensor, pad_token_id: int, context_length: int, 
+    accelerator, tokenizer, generated_prompt_ids, chosen_response,
+    weights: List[int] = [1]
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    This function computes reward scores for a batch of query responses based on a pre-trained reward model.
+
+    Args:
+        model (torch.nn.Module): The pre-trained reward model.
+        query_responses (torch.Tensor): Tensor containing the tokenized responses for which to compute rewards.
+            Shape: (batch_size, sequence_length)
+        pad_token_id (int): The ID used for padding tokens in the tokenized sequences.
+        context_length (int): The length of the prompt or context preceding the completions.
+
+    Returns:
+        Tuple[torch.Tensor, torch.Tensor, torch.Tensor]: A tuple containing:
+            - reward_logits: The logits output from the model for all tokens in the sequences.
+              Shape: (batch_size, sequence_length)
+            - final_scores: The final reward scores, one for each sequence, after adjusting for sequence lengths.
+              Shape: (batch_size,)
+            - sequence_lengths: The lengths of each sequence (excluding padding).
+              Shape: (batch_size,)
+    """
+
+    # Create an attention mask where tokens that are not padding have a value of 1, and padding tokens have a value of 0
+    # Shape: (batch_size, sequence_length)
+    attention_mask = query_responses != pad_token_id
+
+    # Calculate position IDs for each token, considering the cumulative sum of the attention mask (to exclude padding)
+    # Shape: (batch_size, sequence_length)
+    position_ids = attention_mask.cumsum(1) - attention_mask.long()  # exclusive cumsum
+
+    # # Access the LM backbone from the reward model using its base model prefix
+    lm_backbones = []
+    for idx, rm_setting in enumerate(models):
+        if rm_setting['name'] == 'intent' or rm_setting['name'] == 'meteor':
+            lm_backbone = rm_setting
+        elif hasattr(rm_setting['model'], 'module'):
+            temp = getattr(rm_setting['model'].module, rm_setting['model'].module.base_model_prefix)
+            lm_backbone = {
+                'name': 'lm_backbone',
+                'type': 'lm',
+                'model': temp
+            }
+        else:
+            temp = getattr(rm_setting['model'], rm_setting['model'].base_model_prefix)
+            lm_backbone = {
+                'name': 'lm_backbone',
+                'type': 'lm',
+                'model': temp
+            }
+        
+
+        lm_backbones.append(lm_backbone)
+        # Replace padding tokens with zeros in the input IDs (so padding tokens won't affect the model's processing)
+        # Shape: (batch_size, sequence_length)
+    input_ids = torch.masked_fill(query_responses, ~attention_mask, 0)
+    outputs = []
+    for lm_backbone in lm_backbones:
+        if lm_backbone['type'] == 'lm':
+            output = lm_backbone['model'](
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+                return_dict=True,
+                output_hidden_states=True,
+                use_cache=False,  # otherwise mistral-based RM would error out
+            )
+        elif lm_backbone['type'] == 'metric':
+            generated_text = tokenizer.decode(generated_prompt_ids[0])
+
+            metric = lm_backbone['model']
+            output = metric.compute(
+                prompt_texts=None,  # Prompts are not required for METEOR
+                generated_texts=generated_text,
+                reference_texts=chosen_response,
+            )
+            output = torch.tensor(output).to(accelerator.device)
+
+        outputs.append(output)
+    
+
+    reward_logits_list = []
+    for idx, (rm_setting, output) in enumerate(zip(models, outputs)):
+        if hasattr(rm_setting['model'], 'module'):
+            reward_logits = rm_setting['model'].module.score(output.hidden_states[-1])
+        else:
+            reward_logits = rm_setting['model'].score(output.hidden_states[-1])  # (batch_size, sequence_length)
+        reward_logits_list.append(reward_logits)
+
+    # Calculate the length of each sequence by finding the first occurrence of a padding token after the context
+    # sequence_lengths shape: (batch_size,)
+    sequence_lengths = first_true_indices(query_responses[:, context_length:] == pad_token_id) - 1 + context_length
+    for reward_logits in reward_logits_list:
+        assert (
+            reward_logits.shape[-1] == 1
+        ), "Reward model should output a single scalar per token. Check if you added `num_labels=1` when doing `AutoModelForSequenceClassification.from_pretrained(...)`."
+        # https://github.com/huggingface/transformers/blob/dc68a39c8111217683bf49a4912d0c9018bab33d/src/transformers/models/gpt2/modeling_gpt2.py#L1454
+    
+    stacked_reward_logits = torch.stack(reward_logits_list)
+    weights = torch.tensor(weights).view(-1, 1, 1, 1).to(stacked_reward_logits.device)
+    weighted_matrices = stacked_reward_logits * weights
+    reward_logits = weighted_matrices.sum(dim = 0)
+
+    # Return the reward logits for all tokens, the final reward scores for each sequence, and the sequence lengths
+    return (
+        # reward_logits shape: (batch_size, sequence_length)
+        reward_logits,
+        # final_scores shape: (batch_size,)
+        reward_logits[
+            torch.arange(reward_logits.size(0), device=reward_logits.device),
+            sequence_lengths,
+        ].squeeze(
+            -1
+        ),  # Shape: (batch_size,)
+        sequence_lengths,
+        [logits[
+            torch.arange(reward_logits.size(0), device=reward_logits.device),
+            sequence_lengths,
+        ].squeeze(
+            -1
+        ) for logits in reward_logits_list]
+    )
+>>>>>>> recovery
 
 def get_multiple_reward(
     models: torch.nn.Module, query_responses: torch.Tensor, pad_token_id: int, context_length: int, weights: List[int] = [1]
@@ -252,6 +573,10 @@ def get_multiple_reward(
             lm_backbone = getattr(model.module, model.module.base_model_prefix)
         else:
             lm_backbone = getattr(model, model.base_model_prefix)
+<<<<<<< HEAD
+=======
+
+>>>>>>> recovery
         lm_backbones.append(lm_backbone)
         # Replace padding tokens with zeros in the input IDs (so padding tokens won't affect the model's processing)
         # Shape: (batch_size, sequence_length)
@@ -307,6 +632,7 @@ def get_multiple_reward(
             sequence_lengths,
         ].squeeze(
             -1
+<<<<<<< HEAD
         ) for logits in reward_logits_list],
     )
 
@@ -319,6 +645,281 @@ def get_multiple_reward(
         sequence_lengths
     )
 
+=======
+        ) for logits in reward_logits_list]
+    )
+
+def get_constraint_rewards(
+    constraint_models: torch.nn.Module, query_responses: torch.Tensor, pad_token_id: int, context_length: int
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    This function computes reward scores for a batch of query responses based on a pre-trained reward model.
+
+    Args:
+        model (torch.nn.Module): The pre-trained reward model.
+        query_responses (torch.Tensor): Tensor containing the tokenized responses for which to compute rewards.
+            Shape: (batch_size, sequence_length)
+        pad_token_id (int): The ID used for padding tokens in the tokenized sequences.
+        context_length (int): The length of the prompt or context preceding the completions.
+
+    Returns:
+        Tuple[torch.Tensor, torch.Tensor, torch.Tensor]: A tuple containing:
+            - reward_logits: The logits output from the model for all tokens in the sequences.
+              Shape: (batch_size, sequence_length)
+            - final_scores: The final reward scores, one for each sequence, after adjusting for sequence lengths.
+              Shape: (batch_size,)
+            - sequence_lengths: The lengths of each sequence (excluding padding).
+              Shape: (batch_size,)
+    """
+
+    # Create an attention mask where tokens that are not padding have a value of 1, and padding tokens have a value of 0
+    # Shape: (batch_size, sequence_length)
+    attention_mask = query_responses != pad_token_id
+
+    # Calculate position IDs for each token, considering the cumulative sum of the attention mask (to exclude padding)
+    # Shape: (batch_size, sequence_length)
+    position_ids = attention_mask.cumsum(1) - attention_mask.long()  # exclusive cumsum
+
+    # # Access the LM backbone from the reward model using its base model prefix
+    lm_backbones = []
+    for model in constraint_models:
+        if hasattr(model, 'module'):
+            lm_backbone = getattr(model.module, model.module.base_model_prefix)
+        else:
+            lm_backbone = getattr(model, model.base_model_prefix)
+        lm_backbones.append(lm_backbone)
+        # Replace padding tokens with zeros in the input IDs (so padding tokens won't affect the model's processing)
+        # Shape: (batch_size, sequence_length)
+    input_ids = torch.masked_fill(query_responses, ~attention_mask, 0)
+   
+    outputs = []
+    for lm_backbone in lm_backbones:
+        output = lm_backbone(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            return_dict=True,
+            output_hidden_states=True,
+            use_cache=False,  # otherwise mistral-based RM would error out
+        )
+        outputs.append(output)
+    
+    reward_logits_list = []
+    for model, output in zip(constraint_models, outputs):
+        if hasattr(model, 'module'):
+            reward_logits = model.module.score(output.hidden_states[-1])
+        else:
+            reward_logits = model.score(output.hidden_states[-1])  # (batch_size, sequence_length)
+        reward_logits_list.append(reward_logits)
+
+    # Calculate the length of each sequence by finding the first occurrence of a padding token after the context
+    # sequence_lengths shape: (batch_size,)
+    sequence_lengths = first_true_indices(query_responses[:, context_length:] == pad_token_id) - 1 + context_length
+    for reward_logits in reward_logits_list:
+        assert (
+            reward_logits.shape[-1] == 1
+        ), "Reward model should output a single scalar per token. Check if you added `num_labels=1` when doing `AutoModelForSequenceClassification.from_pretrained(...)`."
+        # https://github.com/huggingface/transformers/blob/dc68a39c8111217683bf49a4912d0c9018bab33d/src/transformers/models/gpt2/modeling_gpt2.py#L1454
+    
+    # stacked_reward_logits = torch.stack(reward_logits_list)
+    # weights = torch.tensor(weights).view(-1, 1, 1, 1).to(stacked_reward_logits.device)
+    # weighted_matrices = stacked_reward_logits * weights
+    # reward_logits = weighted_matrices.sum(dim = 0)
+    # Return the reward logits for all tokens, the final reward scores for each sequence, and the sequence lengths
+    return (
+        # reward_logits shape: (batch_size, sequence_length)
+        reward_logits_list,
+        # final_scores shape: (batch_size,)
+        # reward_logits[
+        #     torch.arange(reward_logits.size(0), device=reward_logits.device),
+        #     sequence_lengths,
+        # ].squeeze(
+        #     -1
+        # ),  # Shape: (batch_size,)
+        sequence_lengths,
+        [logits[
+            torch.arange(reward_logits.size(0), device=reward_logits.device),
+            sequence_lengths,
+        ].squeeze(
+            -1
+        ) for logits in reward_logits_list]
+    )
+
+                    # constraint_values = get_constraint_values(unwrapped_constraint_vms, query_response, tokenizer.pad_token_id, context_length)
+
+def get_constraint_values(
+    constraint_models: torch.nn.Module, query_responses: torch.Tensor, pad_token_id: int, context_length: int
+):
+   
+    # Create an attention mask where tokens that are not padding have a value of 1, and padding tokens have a value of 0
+    # Shape: (batch_size, sequence_length)
+    attention_mask = query_responses != pad_token_id
+
+    # Calculate position IDs for each token, considering the cumulative sum of the attention mask (to exclude padding)
+    # Shape: (batch_size, sequence_length)
+    position_ids = attention_mask.cumsum(1) - attention_mask.long()  # exclusive cumsum
+
+    # # Access the LM backbone from the reward model using its base model prefix
+    lm_backbones = []
+    for model in constraint_models:
+        if hasattr(model, 'module'):
+            lm_backbone = getattr(model.module, model.module.base_model_prefix)
+        else:
+            lm_backbone = getattr(model, model.base_model_prefix)
+        lm_backbones.append(lm_backbone)
+        # Replace padding tokens with zeros in the input IDs (so padding tokens won't affect the model's processing)
+        # Shape: (batch_size, sequence_length)
+    input_ids = torch.masked_fill(query_responses, ~attention_mask, 0)
+   
+    outputs = []
+    for lm_backbone in lm_backbones:
+        output = lm_backbone(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            return_dict=True,
+            output_hidden_states=True,
+            use_cache=False,  # otherwise mistral-based RM would error out
+        )
+        outputs.append(output)
+    
+    reward_logits_list = []
+    for model, output in zip(constraint_models, outputs):
+        if hasattr(model, 'module'):
+            reward_logits = model.module.score(output.hidden_states[-1])
+        else:
+            reward_logits = model.score(output.hidden_states[-1])  # (batch_size, sequence_length)
+        reward_logits_list.append(reward_logits)
+
+    # Calculate the length of each sequence by finding the first occurrence of a padding token after the context
+    # sequence_lengths shape: (batch_size,)
+    sequence_lengths = first_true_indices(query_responses[:, context_length:] == pad_token_id) - 1 + context_length
+    for reward_logits in reward_logits_list:
+        assert (
+            reward_logits.shape[-1] == 1
+        ), "Reward model should output a single scalar per token. Check if you added `num_labels=1` when doing `AutoModelForSequenceClassification.from_pretrained(...)`."
+    
+            # reward_logits shape: (batch_size, sequence_length)
+    return reward_logits_list
+
+        
+   
+
+def get_constraint_rewards2(
+    rm_dict_list,
+    query_responses: torch.Tensor,
+    tokenizer,
+    context_length: int,
+    response,
+    chosen_response,
+    accelerator,
+    query
+):
+    attention_mask = query_responses != tokenizer.pad_token_id
+    position_ids = attention_mask.cumsum(1) - attention_mask.long()
+    sequence_lengths = first_true_indices(query_responses[:, context_length:] == tokenizer.pad_token_id) - 1 + context_length
+
+    # Build backbone info
+    lm_backbones = []
+    for rm_dict in rm_dict_list:
+        if rm_dict["type"] == "lm":
+            if hasattr(rm_dict["model"], "module"):
+                backbone = getattr(rm_dict["model"].module, rm_dict["model"].module.base_model_prefix)
+            else:
+                backbone = getattr(rm_dict["model"], rm_dict["model"].base_model_prefix)
+        elif rm_dict["name"] in ["intent", "meteor"]:
+            backbone = rm_dict["model"]
+        else:
+            raise ValueError(f"Unknown rm_dict type/name: {rm_dict}")
+        lm_backbones.append({
+            "backbone": backbone,
+            "type": rm_dict["type"],
+            "name": rm_dict["name"],
+        })
+
+    # Mask out padding tokens
+    input_ids = torch.masked_fill(query_responses, ~attention_mask, 0)
+
+    outputs = []
+    for backbone_dict in lm_backbones:
+        if backbone_dict["type"] == "lm":
+            # Forward pass
+            model_output = backbone_dict["backbone"](
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+                return_dict=True,
+                output_hidden_states=True,
+                use_cache=False,
+            )
+            model = backbone_dict["backbone"]
+
+            # 1) Check if there's a custom `.score(...)`
+            if hasattr(model, "score"):
+                if hasattr(model, "module"):
+                    reward_logits = model.module.score(model_output.hidden_states[-1])
+                else:
+                    reward_logits = model.score(model_output.hidden_states[-1])
+
+            # 2) Otherwise, check if the output has `.logits` (common for SequenceClassification)
+            elif hasattr(model_output, "logits"):
+                reward_logits = model_output.logits
+                # Make sure shape is [batch_size, seq_len, 1] or [batch_size, seq_len]
+                # If it's [batch_size, 1], your indexing with `sequence_lengths` may fail.
+                # Possibly expand dimensions if needed.
+
+                # Example: if shape is [batch_size, seq_len], expand last dim:
+                if reward_logits.ndim == 2:
+                    reward_logits = reward_logits.unsqueeze(-1)
+
+            else:
+                # 3) Fallback: define a dummy single-scalar "reward" from final hidden states
+                #    This is just an example. You may want a better approach or a custom head.
+                final_hidden = model_output.hidden_states[-1]  
+                # shape: [batch_size, seq_len, hidden_size]
+                # For instance, reduce across hidden_size -> shape [batch_size, seq_len, 1]
+                reward_logits = final_hidden.mean(dim=-1, keepdim=True)
+
+            # Finally, use sequence_lengths to select final token's reward
+            output = reward_logits[
+                torch.arange(reward_logits.size(0), device=reward_logits.device),
+                sequence_lengths,
+            ].squeeze(-1)
+
+        else:
+            # If the reward model is a metric (intent, meteor, etc.)
+            generated_text = tokenizer.decode(response[0])
+            if backbone_dict["name"] == "intent":
+                backbone_dict["backbone"]._device = accelerator.local_process_index
+                backbone_dict["backbone"]._model = backbone_dict["backbone"]._model.to(accelerator.local_process_index)
+                prompt = tokenizer.decode(query[0])
+                prompt = [text.replace("[PAD]", "").strip() for text in [prompt]]
+                output = torch.tensor(
+                    backbone_dict["backbone"].compute(
+                        prompt_text=prompt,
+                        generated_texts=generated_text,
+                        reference_texts=chosen_response,
+                    )
+                ).to(accelerator.device)
+            elif backbone_dict["name"] == "meteor":
+                reference_texts = [ref for ref in chosen_response]
+                gen_text = [generated_text]
+                output = torch.tensor(
+                    backbone_dict["backbone"].compute(
+                        prompt_texts=None,
+                        generated_text=gen_text,  # or "generated_texts" if that's the correct arg
+                        reference_texts=reference_texts,
+                    )
+                ).to(accelerator.device)
+            else:
+                raise ValueError(f"Unknown metric type: {backbone_dict['name']}")
+
+        outputs.append(output)
+    return outputs
+
+
+
+>>>>>>> recovery
 def forward(
     model: torch.nn.Module,
     query_responses: torch.Tensor,
