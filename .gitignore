@@ -8,6 +8,7 @@ results
 models
 wandb
 sbatch_files/*
+open_instruct/daily_dialog/
 data/*
 logs/*
 # !data/processed
