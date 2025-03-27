@@ -187,7 +187,7 @@ class Args:
     """stop only after this many tokens"""
     temperature: float = 0.7
     """the sampling temperature"""
-    penalty_reward_value: float = -1.0
+    penalty_reward_value: float = 0.0
     """the reward value for responses that do not contain `stop_token_id`"""
     non_stop_penalty: bool = False
     """whether to penalize responses that do not contain `stop_token_id`"""
@@ -583,6 +583,11 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
         attn_implementation="flash_attention_2",
         use_cache=False,
     )
+    num_params = sum(p.numel() for p in policy.parameters())
+
+    print(f"Policy model has {num_params} parameters")
+    print(f'policy_model: {policy}')
+    print(f'model config: {policy.config}')
     ref_model: PreTrainedModel = AutoModelForCausalLM.from_pretrained(
         model_config.model_name_or_path,
         revision=model_config.model_revision,
@@ -928,7 +933,7 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
     proxy_points = torch.tensor([0.2295, 0.3538])
     
     lagrange_multipliers = torch.ones(len(constraint_rm_list), requires_grad=True, device=device)  # initialize multipliers
-    lagrange_optimizer = optim.Adam([lagrange_multipliers], lr=1e-2)  # Choose an appropriate learning rate
+    lagrange_optimizer = optim.Adam([lagrange_multipliers], lr=1e-1)  # Choose an appropriate learning rate
 
 
     for _ in range(1, resume_training_step):  # we didn't store scheduler state
@@ -1291,10 +1296,8 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
                         mb_constraint_values = constraint_rm_values[:, micro_batch_inds]
 
                                                 # Combine main task and constraint advantages into mixed advantages
-                        if False:
-                            lagrange = lagrange_multipliers.view(-1, 1, 1)
-                        else:
-                            lagrange = torch.tanh(lagrange_multipliers).view(-1, 1, 1)  # Detach Lagrange multipliers
+
+                        lagrange = torch.sigmoid(lagrange_multipliers).view(-1, 1, 1)  # Detach Lagrange multipliers
                         # Compute Lagrange multipliers with sigmoid to bound them between 0 and 1
                         n_constraints = 2
                         mixed_advantages = (n_constraints - lagrange.sum()) * mb_advantage + torch.sum(lagrange * mb_constraint_advantages, dim=0)
@@ -1339,7 +1342,9 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
                         vf_loss_max = torch.max(vf_losses1, vf_losses2)
                         vf_loss_main = 0.5 * masked_mean(vf_loss_max, ~padding_mask_p1[micro_batch_inds])
                         # Combine main and constraint value losses
-                        vf_loss_total = vf_loss_main + sum(vf_loss_constraints)
+                        constraint_vf_coeff = 0.5
+                        kl_vf_coeff = 0.2
+                        vf_loss_total = kl_vf_coeff * vf_loss_main + constraint_vf_coeff * sum(vf_loss_constraints)
                         
                         ## old vanilla ppo
                         # logprobs_diff = new_logprobs - mb_logprobs
@@ -1372,10 +1377,11 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
                                 torch.mean(score) - proxy_point
                                 for score, proxy_point in zip(mb_constraint_return, proxy_points)
                             ])  # Shape: [num_constraints]
+                        lagrange_for_loss = torch.sigmoid(lagrange_multipliers)
 
                         # Compute Lagrange loss based on constraint violations
                         # lagrange = torch.sigmoid(lagrange_multipliers)  # Ensure multipliers are between 0 and 1
-                        lagrange_loss = -(lagrange * constraint_violations.detach()).sum()  # Detach violations to prevent gradient flow
+                        lagrange_loss = -(lagrange_for_loss * constraint_violations.detach()).sum()  # Detach violations to prevent gradient flow
 
                         # Backward pass on Lagrange loss and optimizer step for Lagrange multipliers
                         lagrange_optimizer.zero_grad()

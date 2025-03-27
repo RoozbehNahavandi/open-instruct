@@ -166,11 +166,7 @@ class Args:
     """the mini batch size per GPU"""
     mini_batch_size: Optional[int] = None
     """the mini batch size across GPUs"""
-<<<<<<< HEAD
-    local_rollout_forward_batch_size: int = 64
-=======
     local_rollout_forward_batch_size: int = 20
->>>>>>> recovery
     """per rank no grad forward pass in the rollout phase"""
     reward_models_path: str = None
     """the list of paths to the reward models"""
@@ -200,29 +196,17 @@ class Args:
     """whether to penalize responses that do not contain `stop_token_id`"""
 
     # online PPO specific args
-<<<<<<< HEAD
-    beta: float = 0.05
-=======
     beta: float = 0.2
->>>>>>> recovery
     """the beta value of the RLHF objective (KL coefficient)"""
     whiten_rewards: bool = False
     """whether to whiten the rewards"""
     cliprange: float = 0.2
     """the clip range"""
-<<<<<<< HEAD
-    vf_coef: float = 0.1
-    """the value function coefficient"""
-    cliprange_value: float = 0.2
-    """the clip range for the value function"""
-    gamma: float = 1
-=======
     vf_coef: float = 0.5
     """the value function coefficient"""
     cliprange_value: float = 0.2
     """the clip range for the value function"""
     gamma: float = 0.99
->>>>>>> recovery
     """the discount factor"""
     lam: float = 0.95
     """the lambda value for GAE"""
@@ -363,11 +347,7 @@ def vllm_generate(
         items = param_prompt_Q.get()
         if items is None:
             break
-<<<<<<< HEAD
-        unwrapped_model, g_queries_list = items
-=======
         unwrapped_model, g_queries_list, chosen_responses, meta_data = items
->>>>>>> recovery
         if unwrapped_model is not None:
             start_time = time.time()
             llmp.load_weights(unwrapped_model.named_parameters())
@@ -378,43 +358,27 @@ def vllm_generate(
         outputs = llm.generate(prompt_token_ids=g_queries_list, sampling_params=generation_config)
         response_ids = [list(output.outputs[0].token_ids) for output in outputs]
         print(f"🔥🔥🔥 Generation time: {time.time() - generation_start_time:.2f} seconds")
-<<<<<<< HEAD
-        response_ids_Q.put(response_ids)
-=======
         response_ids_Q.put((response_ids, chosen_responses, meta_data))
 
->>>>>>> recovery
 
         if sample_evaluation_prompt_token_ids is not None and (training_step - 1) % eval_freq == 0:
             outputs = llm.generate(
                 prompt_token_ids=sample_evaluation_prompt_token_ids, sampling_params=generation_config
             )
-<<<<<<< HEAD
-            response_ids = [list(output.outputs[0].token_ids) for output in outputs]
-            evaluation_Q.put(response_ids)
-
-
-def send_queries(accelerator, unwrapped_model, tokenizer, param_prompt_Q, queries):
-=======
 
             response_ids = [list(output.outputs[0].token_ids) for output in outputs]
             evaluation_Q.put((response_ids, chosen_responses))
 
 
 def send_queries(accelerator, unwrapped_model, tokenizer, param_prompt_Q, queries, chosen_responses, meta_data):
->>>>>>> recovery
     g_queries_list = gather_object(queries.tolist())
     if accelerator.is_main_process:
         g_queries_list = [
             [inneritem for inneritem in item if inneritem != tokenizer.pad_token_id] for item in g_queries_list
         ]  # remove padding
-<<<<<<< HEAD
-        param_prompt_Q.put((unwrapped_model, g_queries_list))
-=======
         param_prompt_Q.put((unwrapped_model, g_queries_list, chosen_responses, meta_data))
         # preference_responses_Q.put((chosen_responses))
 
->>>>>>> recovery
 
 
 # taken from https://github.com/OpenLMLab/MOSS-RLHF/blob/40b91eb2f2b71b16919addede0341d2bef70825d/ppo/ppo_trainer.py#L29
@@ -532,20 +496,13 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
     train_dataset = combine_dataset(
         args.dataset_mixer_dict,
         splits=args.dataset_train_splits,
-<<<<<<< HEAD
-        columns_to_keep=[dataset_config.sft_messages_key],
-=======
         columns_to_keep=[dataset_config.sft_messages_key, dataset_config.preference_chosen_key, dataset_config.preference_rejected_key, 'meta_data'],
->>>>>>> recovery
     )
     if dataset_config.sanity_check:
         train_dataset = train_dataset.select(
             range(0, min(len(train_dataset), dataset_config.sanity_check_max_samples))
         )
-<<<<<<< HEAD
-=======
     print(f'train_dataset 0: {train_dataset[0]}')
->>>>>>> recovery
     with accelerator.main_process_first():
         train_dataset = dataset_processor.tokenize(train_dataset)
         train_dataset = dataset_processor.filter(train_dataset)
@@ -555,21 +512,14 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
         eval_dataset = combine_dataset(
             args.dataset_eval_mixer_dict,
             splits=args.dataset_eval_splits,
-<<<<<<< HEAD
-            columns_to_keep=[dataset_config.sft_messages_key],
-=======
             columns_to_keep=[dataset_config.sft_messages_key, dataset_config.preference_chosen_key, dataset_config.preference_rejected_key, 'meta_data'],
->>>>>>> recovery
         )
         eval_dataset = eval_dataset.select(range(0, min(len(eval_dataset), dataset_config.sanity_check_max_samples)))
         with accelerator.main_process_first():
             eval_dataset = dataset_processor.tokenize(eval_dataset)
             eval_dataset = dataset_processor.filter(eval_dataset)
         dataset_dict["eval"] = eval_dataset
-<<<<<<< HEAD
-=======
     
->>>>>>> recovery
 
     # some more runtime logging
     if accelerator.is_main_process:
@@ -605,17 +555,6 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
         attn_implementation="flash_attention_2",
         use_cache=False,
     )
-<<<<<<< HEAD
-    # print(args.reward_models_path, args.rm_weights)
-    print(type(args.rm_weights))
-    print('77777' * 8)
-
-    reward_models_list = args.reward_models_path.split(',')
-    print(f'reward models list: {reward_models_list}')
-    rm_weights = list(map(float, args.rm_weights.split(',')))
-    print(f'rm weights: {rm_weights}')
-    print('8888' * 10)
-=======
     value_model = AutoModelForSequenceClassification.from_pretrained(
         "gpt2",                        # Base model
         num_labels=1,                  # Single scalar output for regression
@@ -627,7 +566,6 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
 
     reward_models_list = args.reward_models_path.split(',')
     rm_weights = list(map(float, args.rm_weights.split(',')))
->>>>>>> recovery
 
     rm_list = [AutoModelForSequenceClassification.from_pretrained(
         path,
@@ -636,18 +574,6 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
         torch_dtype=torch.bfloat16,
         attn_implementation="flash_attention_2",
         use_cache=False,
-<<<<<<< HEAD
-    ) for path in reward_models_list]
-
-    for rm in rm_list:
-        if policy.config.vocab_size != rm.config.vocab_size:
-            raise ValueError(
-                "Policy and reward model must have the same vocab size. "
-                f"Policy: {policy.config.vocab_size}, Reward: {rm.config.vocab_size}. "
-                "If they don't have the same vocab size, the policy could generate tokens which "
-                "is going to cause index out of bound error in the reward model."
-            )
-=======
     ) for path in reward_models_list if 'meteor' not in path and 'intent' not in path]
     
 
@@ -706,15 +632,10 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
     #             "If they don't have the same vocab size, the policy could generate tokens which "
     #             "is going to cause index out of bound error in the reward model."
     #         )
->>>>>>> recovery
 
     model = PolicyAndValueWrapper(policy, value_model)
     if model_config.gradient_checkpointing:
         model.gradient_checkpointing_enable()
-<<<<<<< HEAD
-    for module in [model, ref_model] + rm_list:
-        disable_dropout_in_model(module)
-=======
     if not meteor_flag and not intent_flag:   
         for module in [model, ref_model] + rm_list:
             disable_dropout_in_model(module)
@@ -726,7 +647,6 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
         if rm_setting['type'] == 'lm':
             disable_dropout_in_model(rm_setting['model'])
 
->>>>>>> recovery
     if args.stop_token:
         if args.stop_token == "eos":
             args.stop_token_id = tokenizer.eos_token_id
@@ -739,13 +659,9 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
         num_warmup_steps=args.warm_up_steps,
         num_training_steps=args.num_training_steps * args.num_train_epochs,
     )
-<<<<<<< HEAD
-    data_collator = SimpleGenerateCollator(pad_token_id=tokenizer.pad_token_id)
-=======
     # print(f'an train_dataset 0: {train_dataset[0]}')
         # print(type(train_dataset[column][0]), 'khodaya kose madaret', train_dataset[column], f'column: {column}')
     data_collator = SimplePreferenceGenerateCollator(pad_token_id=tokenizer.pad_token_id)
->>>>>>> recovery
     dataloader = DataLoader(
         train_dataset,
         batch_size=args.local_dataloader_batch_size,
@@ -763,10 +679,6 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
     resume_training_step = 1
     if os.path.exists(args.checkpoint_output_dir):
         for item in os.listdir(args.checkpoint_output_dir):
-<<<<<<< HEAD
-            print(item)
-=======
->>>>>>> recovery
             if "step_" in item:
                 old_checkpoint_path = os.path.join(args.checkpoint_output_dir, item)
                 # check if the directory is empty
@@ -821,16 +733,6 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
 
     # Apply the appropriate setup to each model in the list
     if is_deepspeed_enabled:
-<<<<<<< HEAD
-        rm_list = [
-            prepare_deepspeed(model, args.per_device_train_batch_size, mixed_precision) 
-            for model in rm_list
-        ]
-        ref_model = prepare_deepspeed(ref_model, args.per_device_train_batch_size, mixed_precision)
-    else:
-        rm_list = [model.to(device) for model in rm_list]
-        ref_model = ref_model.to(device)
-=======
         if not meteor_flag and not intent_flag:
             rm_list = [
                 prepare_deepspeed(model, args.per_device_train_batch_size, mixed_precision) 
@@ -872,7 +774,6 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
             rm_list[0]._model = intent_model
         ## Added zzz
 
->>>>>>> recovery
 
     # online generation config
     def repeat_generator():
@@ -880,24 +781,18 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
             yield from dataloader
 
     iter_dataloader = iter(repeat_generator())
-<<<<<<< HEAD
-=======
     original_gen_kwargs = {'do_sample': True, 'top_k': 20, 'min_length': 2, 'max_new_tokens': 20}
->>>>>>> recovery
     generation_config = SamplingParams(
         temperature=args.temperature,
         top_p=1.0,
         max_tokens=args.response_length,
         include_stop_str_in_output=True,
     )
-<<<<<<< HEAD
-=======
     generation_config = SamplingParams(
         top_k=20,
         max_tokens=args.response_length,
         include_stop_str_in_output=True,
     )
->>>>>>> recovery
     param_prompt_Q = None
     response_ids_Q = None
     evaluation_Q = None
@@ -943,27 +838,18 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
     entropy_stats = torch.zeros(stats_shape, device=device)
     ratio_stats = torch.zeros(stats_shape, device=device)
     local_metrics = torch.zeros((20,), device=device)
-<<<<<<< HEAD
-    local_metrics_rm = torch.zeros((len(rm_list), ), device = device)
-    episode = args.batch_size * (resume_training_step - 1)
-=======
     local_metrics_rm = torch.zeros((len(rm_dict_list), ), device = device)
     episode = args.batch_size * (resume_training_step - 1)
     eval_rm = []
->>>>>>> recovery
     model.train()
 
     # training loop
     start_time = time.time()
     data = next(iter_dataloader)
     queries_next = data[INPUT_IDS_PROMPT_KEY].to(device)
-<<<<<<< HEAD
-    send_queries(accelerator, None, tokenizer, param_prompt_Q, queries_next)
-=======
     chosen_responses = [d[1]['content'] for d in data['chosen']]
     meta_data = [d for d in data['meta_data']]
     send_queries(accelerator, None, tokenizer, param_prompt_Q, queries_next, chosen_responses, meta_data)
->>>>>>> recovery
 
     for _ in range(1, resume_training_step):  # we didn't store scheduler state
         scheduler.step()
@@ -977,11 +863,7 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
 
         if accelerator.is_main_process:
             try:
-<<<<<<< HEAD
-                evaluation_responses = evaluation_Q.get(timeout=0.01)
-=======
                 evaluation_responses, chosen_responses = evaluation_Q.get(timeout=0.01)
->>>>>>> recovery
                 print("🔥🔥🔥 Evaluation responses received")
                 table = {}
                 table["prompt"] = tokenizer.batch_decode(sample_evaluation_prompt_token_ids)
@@ -1004,22 +886,14 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
                 if training_step != 1:
                     data = next(iter_dataloader)
                     queries_next = data[INPUT_IDS_PROMPT_KEY].to(device)
-<<<<<<< HEAD
-                send_queries(accelerator, generation_model, tokenizer, param_prompt_Q, queries_next)
-=======
                 send_queries(accelerator, generation_model, tokenizer, param_prompt_Q, queries_next, chosen_responses, meta_data)
->>>>>>> recovery
             else:
                 if training_step != 1:
                     # NOTE: important: the indent here is different for sync mode
                     # we also set to use `queries = queries_next` immediately
                     data = next(iter_dataloader)
                     queries_next = data[INPUT_IDS_PROMPT_KEY].to(device)
-<<<<<<< HEAD
-                    send_queries(accelerator, generation_model, tokenizer, param_prompt_Q, queries_next)
-=======
                     send_queries(accelerator, generation_model, tokenizer, param_prompt_Q, queries_next, chosen_responses, meta_data)
->>>>>>> recovery
                     queries = queries_next
 
             training_time_start = time.time()
@@ -1030,25 +904,16 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
                 logprobs = []
                 ref_logprobs = []
                 scores = []
-<<<<<<< HEAD
-                rm_scores = {}
-                for rm_idx, _ in enumerate(rm_list):
-=======
                 eval_scores = []
                 rm_scores = {}
                 for rm_idx, _ in enumerate(rm_dict_list):
->>>>>>> recovery
                     rm_scores[rm_idx] = []
                 sequence_lengths = []
                 values = []
                 if accelerator.is_main_process:
-<<<<<<< HEAD
-                    g_response_token_ids = response_ids_Q.get()
-=======
                     g_response_token_ids, chosen_responses, meta_data = response_ids_Q.get()
                     print(f'meta_data: {meta_data}')
                     # print(f'g_response_token_ids: {tokenizer.decode(g_response_token_ids[0])}')
->>>>>>> recovery
                     DUMMY_PAD_TOKEN = 0  # we can't use tokenizer.pad_token_id because it's outside vocab and `torch.gather(all_logprob, 2, response.unsqueeze(-1))` will error out
                     g_padded_response_ids = [
                         response + [DUMMY_PAD_TOKEN] * (args.response_length - len(response))
@@ -1067,21 +932,13 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
                     * queries.shape[0] : (accelerator.local_process_index + 1)
                     * queries.shape[0]
                 ]
-<<<<<<< HEAD
-=======
-
->>>>>>> recovery
                 query_responses = torch.cat((queries, local_vllm_responses), 1)
                 for i in range(0, queries.shape[0], args.local_rollout_forward_batch_size):
                     query = queries[i : i + args.local_rollout_forward_batch_size]
                     query_response = query_responses[i : i + args.local_rollout_forward_batch_size]
-<<<<<<< HEAD
-                    response = query_response[:, context_length:]
-=======
                     chosen_response = chosen_responses[i : i + args.local_rollout_forward_batch_size]
                     response = query_response[:, context_length:]
                     meta_info = meta_data[i: i + args.local_rollout_forward_batch_size]
->>>>>>> recovery
                     output = forward(generation_model, query_response, tokenizer.pad_token_id)
                     logits = output.logits[:, context_length - 1 : -1]
                     logits /= args.temperature + 1e-7
@@ -1107,12 +964,6 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
 
                     # Response Processing 2. run reward model on the truncated responses
                     postprocessed_query_response = torch.cat((query, postprocessed_response), 1)
-<<<<<<< HEAD
-                    sequence_length = first_true_indices(postprocessed_response == tokenizer.pad_token_id) - 1
-                    _, score, _, rm_values = get_multiple_reward(
-                        rm_list, postprocessed_query_response, tokenizer.pad_token_id, context_length, weights = rm_weights
-                    )
-=======
 
                     # print("g_response_token_ids type, g_response_token_ids", type(g_response_token_ids), g_response_token_ids, g_padded_response_ids.shape)
                     sequence_length = first_true_indices(postprocessed_response == tokenizer.pad_token_id) - 1
@@ -1139,17 +990,10 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
                         eval_score = get_eval_score(eval_metric, tokenizer, generated, chosen_response, accelerator)
                         
 
->>>>>>> recovery
                     unwrapped_value_model = accelerator.unwrap_model(model).value_model
                     full_value, _, _ = get_reward(
                         unwrapped_value_model, query_response, tokenizer.pad_token_id, context_length
                     )
-<<<<<<< HEAD
-                    # print(f'score: {score} {score.shape}, full_value: {full_value} {full_value.shape}')
-                    # print('--------------')
-=======
-
->>>>>>> recovery
                     value = full_value[:, context_length - 1 : -1].squeeze(-1)
 
                     responses.append(response)
@@ -1158,16 +1002,10 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
                     ref_logprobs.append(ref_logprob)
                     sequence_lengths.append(sequence_length)
                     scores.append(score)
-<<<<<<< HEAD
-                    for rm_idx, score_iter in enumerate(rm_values):
-                        rm_scores[rm_idx].append(score_iter)
-
-=======
                     eval_scores.append(eval_score)
                     for rm_idx, score_iter in enumerate(rm_values):
                         rm_scores[rm_idx].append(score_iter)
                     # print(f'rm_values: {rm_values}')
->>>>>>> recovery
                     values.append(value)
                 responses = torch.cat(responses, 0)
                 postprocessed_responses = torch.cat(postprocessed_responses, 0)
@@ -1175,19 +1013,13 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
                 ref_logprobs = torch.cat(ref_logprobs, 0)
                 sequence_lengths = torch.cat(sequence_lengths, 0)
                 scores = torch.cat(scores, 0)
-<<<<<<< HEAD
-=======
                 eval_scores = torch.cat(eval_scores, 0)
->>>>>>> recovery
 
                 for key in rm_scores:
                     rm_scores[key] = torch.cat(rm_scores[key], 0)
  
                 global_scores = accelerator.gather(scores)
-<<<<<<< HEAD
-=======
                 global_eval_scores = accelerator.gather(eval_scores)
->>>>>>> recovery
                 # global_scores1 = accelerator.gather(scores1)
                 # global_scores2 = accelerator.gather(scores2)
                 accelerator.print(f"global_scores: {global_scores}, {global_scores.mean()}")
@@ -1308,18 +1140,6 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
                         pg_loss = masked_mean(pg_loss_max, ~padding_mask[micro_batch_inds])
                         loss = pg_loss + args.vf_coef * vf_loss
 
-<<<<<<< HEAD
-
-                        # global_rank = accelerator.process_index
-                        # local_rank = accelerator.local_process_index
-                        # world_size = accelerator.num_processes
-
-                        # print(f'Global Rank: {global_rank}')
-                        # print(f'Local Rank: {local_rank}')
-                        # print(f'World Size: {world_size}')
-
-=======
->>>>>>> recovery
                         accelerator.backward(loss)
                         optimizer.step()
                         optimizer.zero_grad()
@@ -1371,15 +1191,10 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
             local_metrics[14] = ratio_stats.var()
             local_metrics[15] = ((kl) ** 2 / 2).sum(1).mean()
             local_metrics[16] = ((-kl).exp() - 1 + kl).sum(1).mean()
-<<<<<<< HEAD
-
-            for idx, rm_idx in enumerate(rm_scores):
-=======
             local_metrics[17] = eval_scores.mean()
 
             for idx, rm_idx in enumerate(rm_scores):
                 # print(f'rm_scores: {rm_scores}')
->>>>>>> recovery
                 local_metrics_rm[idx] = rm_scores[rm_idx].mean()
 
             global_metrics = accelerator.reduce(local_metrics, reduction="mean").tolist()
@@ -1407,12 +1222,6 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
                 "policy/entropy_avg": global_metrics[12],
                 "val/ratio": global_metrics[13],
                 "val/ratio_var": global_metrics[14],
-<<<<<<< HEAD
-            }
-            for rm_idx, local_metric_rm in enumerate(local_metrics_rm):
-                metrics[f'reward_models/RM_{rm_idx}'] = local_metric_rm
-
-=======
                 "objective/eval_score": global_metrics[17]
             }
             for rm_idx, local_metric_rm in enumerate(local_metrics_rm):
@@ -1433,7 +1242,6 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
             # print(f'eval_rm: {eval_rm}')
 
 
->>>>>>> recovery
             if accelerator.is_main_process:
                 print_rich_single_line_metrics(metrics)
                 for key, value in metrics.items():

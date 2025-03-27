@@ -20,12 +20,9 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import List, Literal, Optional, Tuple, Union
 import os
-<<<<<<< HEAD
-=======
 from abc import abstractclassmethod
 import random
 from datasets import load_dataset
->>>>>>> recovery
 
 try:
     import deepspeed
@@ -44,16 +41,11 @@ from rich.panel import Panel
 from rich.table import Table
 from torch.nn.parallel.distributed import DistributedDataParallel
 from transformers import PreTrainedModel, PreTrainedTokenizer
-<<<<<<< HEAD
-=======
 from typing import Any, List, Dict
->>>>>>> recovery
 
 from open_instruct.utils import retry_on_exception
 
 
-<<<<<<< HEAD
-=======
 @dataclass(init=True)
 class Sample:
     id: str
@@ -130,7 +122,6 @@ class DailyDialog(TextGenPool):
         return dp_instance
 
 
->>>>>>> recovery
 @dataclass
 class ModelConfig:
     model_name_or_path: Optional[str] = None
@@ -226,11 +217,8 @@ def first_true_indices(bools: torch.Tensor, dtype=torch.long) -> torch.Tensor:
     return torch.min(zero_or_index, dim=-1).values
 
 
-<<<<<<< HEAD
-=======
 
 
->>>>>>> recovery
 def get_reward(
     model: torch.nn.Module, query_responses: torch.Tensor, pad_token_id: int, context_length: int, weights: List[int] = [1]
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -306,9 +294,6 @@ def get_reward(
         sequence_lengths,
     )
 
-<<<<<<< HEAD
-
-=======
 def get_metric_value(
     metric, 
     tokenizer, 
@@ -533,7 +518,6 @@ def get_reward2(
             -1
         ) for logits in reward_logits_list]
     )
->>>>>>> recovery
 
 def get_multiple_reward(
     models: torch.nn.Module, query_responses: torch.Tensor, pad_token_id: int, context_length: int, weights: List[int] = [1]
@@ -573,10 +557,6 @@ def get_multiple_reward(
             lm_backbone = getattr(model.module, model.module.base_model_prefix)
         else:
             lm_backbone = getattr(model, model.base_model_prefix)
-<<<<<<< HEAD
-=======
-
->>>>>>> recovery
         lm_backbones.append(lm_backbone)
         # Replace padding tokens with zeros in the input IDs (so padding tokens won't affect the model's processing)
         # Shape: (batch_size, sequence_length)
@@ -632,20 +612,6 @@ def get_multiple_reward(
             sequence_lengths,
         ].squeeze(
             -1
-<<<<<<< HEAD
-        ) for logits in reward_logits_list],
-    )
-
-    return (
-        reward_logits,
-        reward_logits[
-            torch.arange(reward_logits.size(0), device = reward_logits.device),
-            sequence_lengths,
-        ].squeeze(-1),
-        sequence_lengths
-    )
-
-=======
         ) for logits in reward_logits_list]
     )
 
@@ -919,7 +885,6 @@ def get_constraint_rewards2(
 
 
 
->>>>>>> recovery
 def forward(
     model: torch.nn.Module,
     query_responses: torch.Tensor,
