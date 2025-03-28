@@ -1,5 +1,5 @@
 """
-This is Regular PPO
+This is MDPO
 """
 
 import gc
@@ -198,6 +198,9 @@ class Args:
     lam: float = 0.95
     """the lambda value for GAE"""
     kl_estimator: Literal["kl1", "kl2", "kl3"] = "kl1"
+
+    # MDPO specific args
+    outer_lr: float = 0.01
 
     # vLLM settings. NOTE: currently we need to place the vLLM model on a separate GPU
     # for generation to work properly because vLLM would pre-alocate the memory.
@@ -1011,12 +1014,27 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
                         vf_loss = 0.5 * masked_mean(vf_loss_max, ~padding_mask_p1[micro_batch_inds])
                         logprobs_diff = new_logprobs - mb_logprobs
                         ratio = torch.exp(logprobs_diff)
-                        pg_losses = -mb_advantage * ratio
-                        pg_losses2 = -mb_advantage * torch.clamp(ratio, 1.0 - args.cliprange, 1.0 + args.cliprange)
-                        pg_loss_max = torch.max(pg_losses, pg_losses2)
-                        pg_loss = masked_mean(pg_loss_max, ~padding_mask[micro_batch_inds])
+
+
+                        """MDPO"""
+                        # Compute the probability ratio as before
+                        logprobs_diff = new_logprobs - mb_logprobs
+                        ratio = torch.exp(logprobs_diff)
+                        
+                        # Compute KL divergence between new and reference policies over this minibatch.
+                        # Here, we assume that ref_logprobs contains the log probabilities from your reference policy.
+                        # Make sure that ref_logprobs[micro_batch_inds] is aligned with new_logprobs.
+                        kl_div = torch.mean(new_logprobs - ref_logprobs[micro_batch_inds])
+                        
+                        # MDPO objective: expected advantage minus a KL penalty weighted by args.outer_lr.
+                        # (args.outer_lr here plays the role of the KL penalty coefficient.)
+                        mdpo_obj = torch.mean(ratio * mb_advantage) - args.outer_lr * kl_div
+                        
+                        # The loss is the negative of the MDPO objective.
+                        pg_loss = -mdpo_obj
                         loss = pg_loss + args.vf_coef * vf_loss
 
+                        """MDPO"""
                         # subprocess.run(['nvidia-smi'], shell=True)
 
                         # global_rank = accelerator.process_index
@@ -1030,21 +1048,16 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
                         accelerator.backward(loss)
                         optimizer.step()
                         optimizer.zero_grad()
+                        """MDPO"""
+                        ref_model.load_state_dict(policy.state_dict(), strict=False)
+                        """MDPO"""
                         with torch.no_grad():
-                            pg_clipfrac = masked_mean(
-                                (pg_losses2 > pg_losses).float(), ~padding_mask[micro_batch_inds]
-                            )
-                            vf_clipfrac = masked_mean(
-                                (vf_losses2 > vf_losses1).float(), ~padding_mask_p1[micro_batch_inds]
-                            )
                             prob_dist = torch.nn.functional.softmax(logits, dim=-1)
                             entropy = torch.logsumexp(logits, dim=-1) - torch.sum(prob_dist * logits, dim=-1)
                             approxkl = 0.5 * (logprobs_diff**2).mean()
                             approxkl_stats[epoch_idx, minibatch_idx, gradient_accumulation_idx] = approxkl
-                            pg_clipfrac_stats[epoch_idx, minibatch_idx, gradient_accumulation_idx] = pg_clipfrac
                             pg_loss_stats[epoch_idx, minibatch_idx, gradient_accumulation_idx] = pg_loss
                             vf_loss_stats[epoch_idx, minibatch_idx, gradient_accumulation_idx] = vf_loss
-                            vf_clipfrac_stats[epoch_idx, minibatch_idx, gradient_accumulation_idx] = vf_clipfrac
                             entropy_stats[epoch_idx, minibatch_idx, gradient_accumulation_idx] = entropy.mean()
                             ratio_stats[epoch_idx, minibatch_idx, gradient_accumulation_idx] = ratio.mean()
 
@@ -1053,8 +1066,8 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
                 # fmt: off
                 del (
                     output, vpred_temp, logits, new_all_logprobs, new_logprobs, vpred, vpredclipped,
-                    vf_losses1, vf_losses2, vf_loss, vf_clipfrac, logprobs_diff, ratio, pg_losses, pg_losses2, pg_loss_max,
-                    pg_loss, loss, pg_clipfrac, prob_dist, entropy, approxkl, mb_return,
+                    vf_losses1, vf_losses2, vf_loss, logprobs_diff, ratio,
+                    pg_loss, loss, prob_dist, entropy, approxkl, mb_return,
                     mb_advantage, mb_values, mb_responses, mb_query_responses, mb_logprobs,
                 )
                 # fmt: on
@@ -1069,10 +1082,8 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
             local_metrics[5] = rlhf_reward.mean()
             local_metrics[6] = scores.mean()
             local_metrics[7] = approxkl_stats.mean()
-            local_metrics[8] = pg_clipfrac_stats.mean()
             local_metrics[9] = pg_loss_stats.mean()
             local_metrics[10] = vf_loss_stats.mean()
-            local_metrics[11] = vf_clipfrac_stats.mean()
             local_metrics[12] = entropy_stats.mean()
             local_metrics[13] = ratio_stats.mean()
             local_metrics[14] = ratio_stats.var()
@@ -1100,10 +1111,8 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
                 "objective/rlhf_reward": global_metrics[5],
                 "objective/scores": global_metrics[6],
                 "policy/approxkl_avg": global_metrics[7],
-                "policy/clipfrac_avg": global_metrics[8],
                 "loss/policy_avg": global_metrics[9],
                 "loss/value_avg": global_metrics[10],
-                "val/clipfrac_avg": global_metrics[11],
                 "policy/entropy_avg": global_metrics[12],
                 "val/ratio": global_metrics[13],
                 "val/ratio_var": global_metrics[14],
