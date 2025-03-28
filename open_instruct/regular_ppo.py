@@ -1016,17 +1016,6 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
                         pg_loss_max = torch.max(pg_losses, pg_losses2)
                         pg_loss = masked_mean(pg_loss_max, ~padding_mask[micro_batch_inds])
                         loss = pg_loss + args.vf_coef * vf_loss
-
-                        # subprocess.run(['nvidia-smi'], shell=True)
-
-                        # global_rank = accelerator.process_index
-                        # local_rank = accelerator.local_process_index
-                        # world_size = accelerator.num_processes
-
-                        # print(f'Global Rank: {global_rank}')
-                        # print(f'Local Rank: {local_rank}')
-                        # print(f'World Size: {world_size}')
-
                         accelerator.backward(loss)
                         optimizer.step()
                         optimizer.zero_grad()

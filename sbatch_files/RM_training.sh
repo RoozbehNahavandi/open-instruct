@@ -4,7 +4,8 @@
 #SBATCH --output ./logs/train/ppo/reward_modeling/open_instruct-%j.log
 #SBATCH --error=./logs/train/ppo/reward_modeling/open-instruct-%j.err
 #SBATCH --mail-type=ALL
-#SBATCH --job-name=RM_training_llama3_8b
+#SBATCH --job-name=SafetyRM_1b
+#SBATCH --clusters=cardinal
 
 
 #SBATCH --nodes=1
@@ -12,7 +13,7 @@
 #SBATCH --gpus-per-node=4
 #SBATCH --mem=128gb
 #SBATCH --export=ALL
-#SBATCH --time=10:00:00
+#SBATCH --time=1:00:00
 
 
 
@@ -29,11 +30,11 @@ accelerate launch \
     --num_processes 4 \
     --config_file configs/ds_configs/deepspeed_zero3.yaml \
     open_instruct/reward_modeling.py \
-    --dataset_mixer '{"allenai/ultrafeedback_binarized_cleaned": 1.0}' \
-    --dataset_train_splits train_prefs \
-    --dataset_eval_mixer '{"allenai/ultrafeedback_binarized_cleaned": 1.0}' \
-    --dataset_eval_splits test_prefs \
-    --model_name_or_path ../hf_llama3_models/8B \
+    --dataset_mixer '{"split_data/safety_data": 1.0}' \
+    --dataset_train_splits train \
+    --dataset_eval_mixer '{"split_data/safety_data": 1.0}' \
+    --dataset_eval_splits train \
+    --model_name_or_path ../hf_llama3_models/1B \
     --chat_template tulu \
     --learning_rate 3e-6 \
     --per_device_train_batch_size 1 \
@@ -42,9 +43,8 @@ accelerate launch \
     --max_token_length 1024 \
     --max_prompt_token_lenth 1024 \
     --num_train_epochs 1 \
-    --output_dir models/rm/rm_llama3_8b_ultrafb \
+    --output_dir models/rm/safetyrm_v2_1b_1epoch \
     --gradient_checkpointing \
-    --push_to_hub \
     --with_tracking
 
 

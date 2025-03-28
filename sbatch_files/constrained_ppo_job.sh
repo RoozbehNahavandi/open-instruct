@@ -13,7 +13,7 @@
 #SBATCH --gres=gpu:4
 #SBATCH --mem=128gb
 #SBATCH --export=ALL
-#SBATCH --time=24:30:00
+#SBATCH --time=12:30:00
 
 
 
@@ -82,13 +82,12 @@ srun --mpi=pmi2 --nodes=1 --ntasks-per-node=4 \
     --rm_weights ${weights} \
     --main_value_model ${value_model}\
     --wandb_run_name ${MODEL_NAME}__MeteorIntent \
-    --non_stop_penalty \
     --stop_token eos \
     --beta 0.02 \
     --vllm_device cuda:3 \
     --num_evals 3 \
     --response_length 512 \
-    --checkpoint_output_dir output/ppo_checkpoint_constrained_safety_tanh \
+    --checkpoint_output_dir output/ppo_checkpoint \
     --gradient_checkpointing \
     --with_tracking \
 

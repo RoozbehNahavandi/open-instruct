@@ -41,6 +41,7 @@ from transformers import (
     get_scheduler,
 )
 from vllm import LLM, SamplingParams
+import wandb
 
 from open_instruct.dataset_processor import (
     CHAT_TEMPLATES,
@@ -199,7 +200,7 @@ class Args:
     """whether to whiten the rewards"""
     cliprange: float = 0.2
     """the clip range"""
-    vf_coef: float = 0.5
+    vf_coef: float = 1
     """the value function coefficient"""
     cliprange_value: float = 0.2
     """the clip range for the value function"""
@@ -493,7 +494,6 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
     all_configs.update(**asdict(args), **asdict(dataset_config), **asdict(model_config))
     if accelerator.is_main_process:
         if args.with_tracking:
-            import wandb
 
             wandb.init(
                 project=args.wandb_project_name,
@@ -913,7 +913,7 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
     vf_clipfrac_stats = torch.zeros(stats_shape, device=device)
     entropy_stats = torch.zeros(stats_shape, device=device)
     ratio_stats = torch.zeros(stats_shape, device=device)
-    local_metrics = torch.zeros((25,), device=device)
+    local_metrics = torch.zeros((100,), device=device)
     local_metrics_rm = torch.zeros((len(constraint_rm_list), ), device = device)
     episode = args.batch_size * (resume_training_step - 1)
     model.train()
@@ -931,9 +931,12 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
     _METEOR_MIN, _METEOR_MAX = 0.00037604571643093187, 0.24810026760745868
     _INTENT_MIN, _INTENT_MAX = 0.2504002561639449, 0.5283381364073007
     proxy_points = torch.tensor([0.2295, 0.3538])
-    
-    lagrange_multipliers = torch.ones(len(constraint_rm_list), requires_grad=True, device=device)  # initialize multipliers
-    lagrange_optimizer = optim.Adam([lagrange_multipliers], lr=1e-1)  # Choose an appropriate learning rate
+    proxy_points = torch.tensor([0.44, 0.238])
+
+    lagrange_multipliers = torch.nn.Parameter(
+        torch.ones(len(constraint_rm_list), device=device) * 0.5  # initialized to 0.5
+    )
+    lagrange_optimizer = optim.SGD([lagrange_multipliers], lr=1e-1, momentum=0.1)  # lagrange_optimizer = optim.Adam([lagrange_multipliers], lr=1e-2)  # Choose an appropriate learning rate
 
 
     for _ in range(1, resume_training_step):  # we didn't store scheduler state
@@ -1294,8 +1297,15 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
                         mb_constraint_return = constraints_returns[:, micro_batch_inds]
                         mb_values = values[micro_batch_inds]
                         mb_constraint_values = constraint_rm_values[:, micro_batch_inds]
+                        print(f'mb_constraint_advantages.shape: {mb_constraint_advantages.shape}')
+                        print(f'mb_advantage.shape: {mb_advantage.shape}')
+                        print(f'mb_constraint_return.shape: {mb_constraint_return.shape}')
+                        # shape of rewards: 
+                        # mb_constraint_rewards = constraint_rewards[micro_batch_inds]
+                        # mb_rewards = rewards[micro_batch_inds]
+                        # mb_constraint_rm_scores = constraint_rm_scores[micro_batch_inds]
 
-                                                # Combine main task and constraint advantages into mixed advantages
+                        # Combine main task and constraint advantages into mixed advantages
 
                         lagrange = torch.sigmoid(lagrange_multipliers).view(-1, 1, 1)  # Detach Lagrange multipliers
                         # Compute Lagrange multipliers with sigmoid to bound them between 0 and 1
@@ -1372,11 +1382,23 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
 
                                 # After processing each mini-batch, calculate constraint violations and update Lagrange multipliers
                         with torch.no_grad():
-                            # Calculate constraint violations
-                            constraint_violations = torch.stack([
-                                torch.mean(score) - proxy_point
-                                for score, proxy_point in zip(mb_constraint_return, proxy_points)
-                            ])  # Shape: [num_constraints]
+                            # final token index is -1
+                            final_token_constraint = mb_constraint_return[..., -1]  
+                            # => shape [n_constraints, batch_size]
+
+                            # transpose to [batch_size, n_constraints]
+                            final_token_constraint = final_token_constraint.permute(1, 0) 
+                            # => shape [batch_size, n_constraints]
+                            # now you can get a single scalar per constraint by averaging across the batch
+                            # => shape [n_constraints]
+                            constraint_mean = final_token_constraint.mean(dim=0).to(device)
+                            proxy_points = proxy_points.to(constraint_mean.device)
+
+                            constraint_violations = constraint_mean - proxy_points  # shape [n_constraints]
+                            # print(f'constraint_mean shape: {constraint_mean.shape}')
+                            # print(f'constraint_violations: {constraint_violations}')
+                            # print(f'constraint_mean: {constraint_mean}')
+                            # print(f'proxy points: {proxy_points}')
                         lagrange_for_loss = torch.sigmoid(lagrange_multipliers)
 
                         # Compute Lagrange loss based on constraint violations
@@ -1388,12 +1410,13 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
                         lagrange_loss.backward()
                         torch.nn.utils.clip_grad_norm_([lagrange_multipliers], 1)
                         lagrange_optimizer.step()
+                        lagrange = torch.clamp(lagrange, min=0, max = 20)
 
-                        # Optional: clamp Lagrange multipliers to ensure they remain non-negative
-                        # lagrange_multipliers.data = torch.clamp(lagrange_multipliers.data, min=0)
+
 
                         
                         with torch.no_grad():
+                            # print(f'episode: {episode}, training_step: {training_step}, epoch: {epoch_idx}, minibatch: {minibatch_idx}, gradient_accumulation: {gradient_accumulation_idx}')
                             local_metrics[0] = sequence_lengths.float().mean()
                             local_metrics[1] = (responses == args.stop_token_id).sum().float().mean()
                             local_metrics[2] = kl.sum(1).mean()
@@ -1414,6 +1437,9 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
                             local_metrics[17] = eval_scores.mean()
                             local_metrics[18] = lagrange_multipliers[0]
                             local_metrics[19] = lagrange_multipliers[1]
+                            # log constraint violations
+                            local_metrics[20] = constraint_violations[0]
+                            local_metrics[21] = constraint_violations[1]
 
 
 
@@ -1447,8 +1473,10 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
                                 "val/ratio_var": global_metrics[14],
                                 "objective/eval_score": global_metrics[17],
                                 "objective/lagrange_loss": lagrange_loss.mean().item(),
-                                "objective/lagrange_multiplier_1": global_metrics[18],
-                                "objective/lagrange_multiplier_2": global_metrics[19],
+                                "objective/lagrange_multiplier_0": global_metrics[18],
+                                "objective/lagrange_multiplier_1": global_metrics[19],
+                                "objective/constraint_violation_0": global_metrics[20],
+                                "objective/constraint_violation_1": global_metrics[21],
 
                             }
                             for rm_idx, local_metric_rm in enumerate(local_metrics_rm):
@@ -1458,6 +1486,18 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
                                 print_rich_single_line_metrics(metrics)
                                 for key, value in metrics.items():
                                     writer.add_scalar(key, value, episode)
+
+                            if args.with_tracking:
+                                wandb.init(
+                                    project=args.wandb_project_name,
+                                    entity=args.wandb_entity,
+                                    name=args.wandb_run_name,
+                                    sync_tensorboard=True,
+                                    config=all_configs,
+                                    save_code=True,
+                                    tags=[args.exp_name] + get_wandb_tags(),
+            )
+                                wandb.log(metrics)
 
                         with torch.no_grad():
                             pg_clipfrac = masked_mean(
