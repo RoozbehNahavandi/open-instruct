@@ -3,8 +3,7 @@ rejection_sampling/shards
 rejection_sampling/shards1
 token_length.png
 *.tfevents.*
-
-<<<<<<< HEAD
+datasets
 results
 models
 wandb
@@ -13,7 +12,6 @@ split_data/*
 open_instruct/daily_dialog/
 data/*
 logs/*
-=======
 # for on policy preferences 
 birr/
 
@@ -23,7 +21,6 @@ results
 models
 wandb
 data/*
->>>>>>> upstream/main
 # !data/processed
 output/
 configs/beaker_configs/auto_created
