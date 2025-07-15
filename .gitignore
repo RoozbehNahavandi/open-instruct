@@ -156,8 +156,7 @@ dmypy.json
 .pyre/
 
 .idea/
-<<<<<<< HEAD
-=======
 .vscode
 .DS_Store
->>>>>>> upstream/main
+local_dataset_cache/
+datasets/tulu-2.5-pref-data/
