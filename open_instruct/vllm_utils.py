@@ -60,7 +60,7 @@ from vllm.distributed.parallel_state import (
     init_model_parallel_group,
 )
 from vllm.executor.gpu_executor import GPUExecutor
-
+import vllm.distributed.parallel_state as parallel_state
 
 def custom_initialize_model_parallel(
     tensor_model_parallel_size: int = 1,
@@ -150,8 +150,10 @@ def _init_executor(self) -> None:
     self.driver_worker.load_model()
 
 
-# monkey patch the function
 def vllm_single_gpu_patch():
-    vllm.distributed.parallel_state.init_world_group = init_world_group
-    vllm.distributed.parallel_state.initialize_model_parallel = custom_initialize_model_parallel
+    # Patch parallel_state if needed
+    parallel_state.init_world_group = init_world_group
+    parallel_state.initialize_model_parallel = custom_initialize_model_parallel
+
+    # Patch the executor
     GPUExecutor._init_executor = _init_executor

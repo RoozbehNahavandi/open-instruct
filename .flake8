@@ -1,2 +1,6 @@
 [flake8]
+<<<<<<< HEAD
 extend-ignore = E203
+=======
+extend-ignore = E203,E402
+>>>>>>> upstream/main

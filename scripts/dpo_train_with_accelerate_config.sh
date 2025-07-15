@@ -10,7 +10,7 @@ if [ "$#" -ne 2 ]; then
     exit 1
 fi
 
-NUM_GPUS="$4"
+NUM_GPUS="$1"
 CONFIG_FILE="$2"
 
 # Generate CUDA_VISIBLE_DEVICES as a range from 0 to NUM_GPUS-1

@@ -1,154 +1,68 @@
 # Here we use 1 GPU for demonstration, but you can use multiple GPUs and larger eval_batch_size to speed up the evaluation.
-export CUDA_VISIBLE_DEVICES=0
 
 
-
-
-
-# Evaluating llama 7B model using direct answering (no chain-of-thought)
-python -m eval.gsm.run_eval \
-    --data_dir data/eval/gsm/ \
-    --max_num_examples 200 \
-    --save_dir results/gsm/llama-7B-no-cot-8shot \
-    --model ../hf_llama2_models/7B \
-    --tokenizer ../hf_llama2_models/7B \
-    --n_shot 8 \
-    --no_cot \
-    --use_vllm
-
-echo "Finished evaluation on llama2 (no CoT)"
-
-# Evaluating llama 7B model using chain-of-thought
+echo "Evaluating meta-llama/Llama-2-7b-hf"
 python -m eval.gsm.run_eval \
     --data_dir data/eval/gsm/ \
     --max_num_examples 200 \
     --save_dir results/gsm/llama-7B-cot-8shot \
-    --model ../hf_llama2_models/7B \
-    --tokenizer ../hf_llama2_models/7B \
+    --model meta-llama/Llama-2-7b-hf \
+    --tokenizer meta-llama/Llama-2-7b-hf \
     --n_shot 8 \
     --use_vllm
 
-echo "Finished evaluation on llama2 (CoT)"
 
-
-# Evaluating tulu_v2 model using chain-of-thought
+echo "Evaluating Tulu-V2.5-7B_V1"
 python -m eval.gsm.run_eval \
     --data_dir data/eval/gsm/ \
     --max_num_examples 200 \
     --save_dir results/gsm/llama-7B-cot-8shot \
-    --model allenai/tulu-2-7b \
-    --tokenizer allenai/tulu-2-7b \
+    --model models/base_ppo/Tulu-V2.5-7B_V1 \
+    --tokenizer models/base_ppo/Tulu-V2.5-7B_V1 \
     --n_shot 8 \
     --use_vllm
 
-echo "Finished evaluation on allenai/tulu-v2 (CoT)"
+
+# echo "Evaluating allenai/tulu-v2.5-dpo-13b-uf-mean"
+# python -m eval.gsm.run_eval \
+#     --data_dir data/eval/gsm/ \
+#     --max_num_examples 200 \
+#     --save_dir results/gsm/llama-7B-cot-8shot \
+#     --model allenai/tulu-v2.5-dpo-13b-uf-mean \
+#     --tokenizer allenai/tulu-v2.5-dpo-13b-uf-mean \
+#     --n_shot 8 \
+#     --use_vllm
+
+# echo "Evaluating meta-llama/Llama-2-13b-hf"
+# python -m eval.gsm.run_eval \
+#     --data_dir data/eval/gsm/ \
+#     --max_num_examples 200 \
+#     --save_dir results/gsm/llama-7B-cot-8shot \
+#     --model meta-llama/Llama-2-13b-hf \
+#     --tokenizer meta-llama/Llama-2-13b-hf \
+#     --n_shot 8 \
+#     --use_vllm
 
 
-# Evaluating tulu_v2 model using direct answering (no chain-of-thought)
-python -m eval.gsm.run_eval \
-    --data_dir data/eval/gsm/ \
-    --max_num_examples 200 \
-    --save_dir results/gsm/llama-7B-no-cot-8shot \
-    --model allenai/tulu-2-7b \
-    --tokenizer allenai/tulu-2-7b \
-    --n_shot 8 \
-    --no_cot \
-    --use_vllm
-
-echo "Finished evaluation on allenai/tulu-v2 (no CoT)"
+# echo "Evaluating mdpo llama-3.1-tulu-3-8b-preference-mixture"
+# python -m eval.gsm.run_eval \
+#     --data_dir data/eval/gsm/ \
+#     --max_num_examples 200 \
+#     --save_dir results/gsm/llama-7B-no-cot-8shot \
+#     --model models/mdpo/lm_Llama-3.1-Tulu-3-8B-SFT_llama-3.1-tulu-3-8b-preference-mixture_mdpo_nolora_2025-05-08_run211327 \
+#     --tokenizer models/mdpo/lm_Llama-3.1-Tulu-3-8B-SFT_llama-3.1-tulu-3-8b-preference-mixture_mdpo_nolora_2025-05-08_run211327 \
+#     --n_shot 8 \
+#     --no_cot \
+#     --use_vllm
 
 
-
-# Evaluating llama 7B SFT model using chain-of-thought
-python -m eval.gsm.run_eval \
-    --data_dir data/eval/gsm/ \
-    --max_num_examples 200 \
-    --save_dir results/gsm/llama-7B-cot-8shot \
-    --model output/tulu_v2_7B \
-    --tokenizer output/tulu_v2_7B \
-    --n_shot 8 \
-    --use_vllm
-
-echo "Finished evaluation on llama2 SFT (CoT)"
-
-
-# Evaluating llama 7B model using direct answering (no chain-of-thought)
-python -m eval.gsm.run_eval \
-    --data_dir data/eval/gsm/ \
-    --max_num_examples 200 \
-    --save_dir results/gsm/llama-7B-no-cot-8shot \
-    --model output/tulu_v2_7B \
-    --tokenizer output/tulu_v2_7B \
-    --n_shot 8 \
-    --no_cot \
-    --use_vllm
-
-echo "Finished evaluation on llama2 SFT (no CoT)"
-
-
-
-# Evaluating llama 7B model using chain-of-thought
-python -m eval.gsm.run_eval \
-    --data_dir data/eval/gsm/ \
-    --max_num_examples 200 \
-    --save_dir results/gsm/llama-7B-cot-8shot \
-    --model output/dpo_7b_recreate2 \
-    --tokenizer output/dpo_7b_recreate2 \
-    --n_shot 8 \
-    --use_vllm
-
-echo "Finished evaluation on llama2 dpo (CoT)"
-
-
-# Evaluating llama 7B model using direct answering (no chain-of-thought)
-python -m eval.gsm.run_eval \
-    --data_dir data/eval/gsm/ \
-    --max_num_examples 200 \
-    --save_dir results/gsm/llama-7B-no-cot-8shot \
-    --model output/dpo_7b_recreate2 \
-    --tokenizer output/dpo_7b_recreate2 \
-    --n_shot 8 \
-    --no_cot \
-    --use_vllm
-
-echo "Finished evaluation on llama2 dpo (no CoT)"
-
-
-# Evaluating llama 7B model using chain-of-thought
-python -m eval.gsm.run_eval \
-    --data_dir data/eval/gsm/ \
-    --max_num_examples 200 \
-    --save_dir results/gsm/llama-7B-cot-8shot \
-    --model output/dpo_7b_lora_merged2 \
-    --tokenizer output/dpo_7b_lora_merged2 \
-    --n_shot 8 \
-    --use_vllm
-
-echo "Finished evaluation on llama2 dpo_lora (CoT)"
-
-
-# Evaluating llama 7B model using direct answering (no chain-of-thought)
-python -m eval.gsm.run_eval \
-    --data_dir data/eval/gsm/ \
-    --max_num_examples 200 \
-    --save_dir results/gsm/llama-7B-no-cot-8shot \
-    --model output/dpo_7b_lora_merged2 \
-    --tokenizer output/dpo_7b_lora_merged2 \
-    --n_shot 8 \
-    --no_cot \
-    --use_vllm
-
-echo "Finished evaluation on llama2 dpo_lora (no CoT)"
-
-
-
-# # Evaluating tulu 7B model using chain-of-thought and chat format
+# echo "Evaluating llama 3 1b mdpo"
 # python -m eval.gsm.run_eval \
 #     --data_dir data/eval/gsm/ \
 #     --max_num_examples 200 \
 #     --save_dir results/gsm/tulu-7B-cot-8shot \
-#     --model ../checkpoints/tulu_7B \
-#     --tokenizer ../checkpoints/tulu_7B \
+#     --model models/mdpo/lm_llama3_1b_finetuned_ultrafeedback_mdpo_nolora_2025-05-05_run120145 \
+#     --tokenizer models/mdpo/lm_llama3_1b_finetuned_ultrafeedback_mdpo_nolora_2025-05-05_run120145 \
 #     --n_shot 8 \
 #     --use_chat_format \
 #     --chat_formatting_function eval.templates.create_prompt_with_tulu_chat_format \

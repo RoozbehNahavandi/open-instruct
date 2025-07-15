@@ -24,6 +24,10 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
+<<<<<<< HEAD
           python -m pip install pytest torch datasets transformers==4.40.2 accelerate rich
+=======
+          python -m pip install pytest torch datasets transformers==4.40.2 accelerate rich ray
+>>>>>>> upstream/main
       - name: Run unit tests
         run: pytest open_instruct/test_utils.py

@@ -8,14 +8,14 @@ import os
 import random
 import shutil
 import signal
-import subprocess
 import threading
 import time
 from dataclasses import asdict, dataclass
 from queue import Empty, Queue
-from typing import List, Literal, Optional, Tuple
+from typing import Dict, List, Literal, Optional, Tuple, Union
 import subprocess
 import torch.distributed as dist
+import dataclasses
 
 
 import numpy as np
@@ -41,7 +41,7 @@ from transformers import (
     get_scheduler,
 )
 from vllm import LLM, SamplingParams
-
+from eval.templates import create_prompt_with_tulu_chat_format
 from open_instruct.dataset_processor import (
     CHAT_TEMPLATES,
     INPUT_IDS_PROMPT_KEY,
@@ -65,7 +65,14 @@ from open_instruct.model_utils import (
     save_with_accelerate,
     truncate_response,
     unwrap_model_for_generation,
+    generate_model_name,
+    write_readme
 )
+
+
+from eval.utils import generate_completions, dynamic_import_function
+
+
 from open_instruct.utils import (
     ArgumentParserPlus,
     combine_dataset,
@@ -78,8 +85,28 @@ from open_instruct.utils import (
 )
 from open_instruct.vllm_utils import vllm_single_gpu_patch
 
+from eval.ifeval import instructions_registry
+
+
+
 api = HfApi()
 INVALID_LOGPROB = 1.0
+
+@dataclasses.dataclass
+class InputExample:
+    key: int
+    instruction_id_list: List[str]
+    prompt: str
+    kwargs: List[Dict[str, Optional[Union[str, int]]]]
+
+
+@dataclasses.dataclass
+class OutputExample:
+    instruction_id_list: List[str]
+    prompt: str
+    response: str
+    follow_all_instructions: bool
+    follow_instruction_list: List[bool]
 
 
 @dataclass
@@ -107,6 +134,10 @@ class Args:
     """A unique name of this run"""
 
     # optimizer args
+    method: str = 'ppo'
+    """The method to use for training"""
+    use_lora: bool = False
+    """Whether to use LoRA"""
     eps: float = 1e-5
     """The epsilon value for the optimizer"""
     learning_rate: float = 2e-5
@@ -199,6 +230,7 @@ class Args:
     """the lambda value for GAE"""
     kl_estimator: Literal["kl1", "kl2", "kl3"] = "kl1"
 
+
     # vLLM settings. NOTE: currently we need to place the vLLM model on a separate GPU
     # for generation to work properly because vLLM would pre-alocate the memory.
     # To do so, we would need to do a moneky patch `vllm_single_gpu_patch` to make sure
@@ -214,8 +246,13 @@ class Args:
     # Eval RM settings
     evalrm_name_or_path: str = None
     """The name or path of the evaluation reward model"""
+    ifeval: bool = True
+    """if to use IF eval"""
+    ifeval_eval_freq: int = 2
 
     # wandb and HF tracking configs
+    run_id: str = None
+    """unique run id"""
     with_tracking: bool = False
     """If toggled, this experiment will be tracked with Weights and Biases"""
     wandb_project_name: str = "open_instruct_ppo"
@@ -350,12 +387,19 @@ def vllm_generate(
         response_ids = [list(output.outputs[0].token_ids) for output in outputs]
         print(f"🔥🔥🔥 Generation time: {time.time() - generation_start_time:.2f} seconds")
         response_ids_Q.put(response_ids)
-
+        
+        print(sample_evaluation_prompt_token_ids is not None and (training_step - 1) % eval_freq == 0, 'training_step: ', training_step)
         if sample_evaluation_prompt_token_ids is not None and (training_step - 1) % eval_freq == 0:
-            outputs = llm.generate(
-                prompt_token_ids=sample_evaluation_prompt_token_ids, sampling_params=generation_config
+            # print('we are in freaking eval section of llm_generate')
+            prompt_token_ids = sample_evaluation_prompt_token_ids.tolist()
+
+            eval_outputs = llm.generate(
+                prompt_token_ids=prompt_token_ids,
+                sampling_params=generation_config
             )
-            response_ids = [list(output.outputs[0].token_ids) for output in outputs]
+            # print(f'outputs for eval: {eval_outputs}')
+            response_ids = [list(output.outputs[0].token_ids) for output in eval_outputs]
+            # print(f'putting something into eval q: {response_ids}')
             evaluation_Q.put(response_ids)
 
 
@@ -367,6 +411,104 @@ def send_queries(accelerator, unwrapped_model, tokenizer, param_prompt_Q, querie
         ]  # remove padding
         param_prompt_Q.put((unwrapped_model, g_queries_list))
 
+
+def read_prompt_list(input_jsonl_filename):
+    """Read inputs from jsonl."""
+    inputs = []
+    with open(input_jsonl_filename, "r") as f:
+        for l in f:
+            example = json.loads(l)
+            inputs.append(
+                InputExample(key=example["key"],
+                            instruction_id_list=example["instruction_id_list"],
+                            prompt=example["prompt"],
+                            kwargs=example["kwargs"]))
+    return inputs
+
+
+def test_instruction_following_strict(
+    inp,
+    response,
+):
+    """Tests response to see if instrutions are followed."""
+    # response = prompt_to_response[inp.prompt]
+    instruction_list = inp.instruction_id_list
+    is_following_list = []
+
+    for index, instruction_id in enumerate(instruction_list):
+        instruction_cls = instructions_registry.INSTRUCTION_DICT[instruction_id]
+        instruction = instruction_cls(instruction_id)
+
+        instruction.build_description(**inp.kwargs[index])
+        args = instruction.get_instruction_args()
+        if args and "prompt" in args:
+            instruction.build_description(prompt=inp.prompt)
+
+        if response.strip() and instruction.check_following(response):
+            is_following_list.append(True)
+        else:
+            is_following_list.append(False)
+
+    return OutputExample(
+        instruction_id_list=inp.instruction_id_list,
+        prompt=inp.prompt,
+        response=response,
+        follow_all_instructions=all(is_following_list),
+        follow_instruction_list=is_following_list,
+    )
+
+
+def test_instruction_following_loose(
+    inp,
+    response,
+):
+    """Tests response for an upper bound for following instructions."""
+    # response = prompt_to_response[inp.prompt]
+    r = response.split("\n")
+    response_remove_first = "\n".join(r[1:]).strip()
+    response_remove_last = "\n".join(r[:-1]).strip()
+    response_remove_both = "\n".join(r[1:-1]).strip()
+    revised_response = response.replace("*", "")
+    revised_response_remove_first = response_remove_first.replace("*", "")
+    revised_response_remove_last = response_remove_last.replace("*", "")
+    revised_response_remove_both = response_remove_both.replace("*", "")
+    all_responses = [
+        response,
+        revised_response,
+        response_remove_first,
+        response_remove_last,
+        response_remove_both,
+        revised_response_remove_first,
+        revised_response_remove_last,
+        revised_response_remove_both,
+    ]
+    instruction_list = inp.instruction_id_list
+    is_following_list = []
+
+    for index, instruction_id in enumerate(instruction_list):
+        instruction_cls = instructions_registry.INSTRUCTION_DICT[instruction_id]
+        instruction = instruction_cls(instruction_id)
+
+        instruction.build_description(**inp.kwargs[index])
+        args = instruction.get_instruction_args()
+        if args and "prompt" in args:
+            instruction.build_description(prompt=inp.prompt)
+
+        is_following = False
+        for r in all_responses:
+            if r.strip() and instruction.check_following(r):
+                is_following = True
+                break
+
+        is_following_list.append(is_following)
+
+    return OutputExample(
+        instruction_id_list=inp.instruction_id_list,
+        prompt=inp.prompt,
+        response=response,
+        follow_all_instructions=all(is_following_list),
+        follow_instruction_list=is_following_list,
+    )
 
 # taken from https://github.com/OpenLMLab/MOSS-RLHF/blob/40b91eb2f2b71b16919addede0341d2bef70825d/ppo/ppo_trainer.py#L29
 # we did this we can do a single `model = accelerator.prepare(model)`
@@ -426,27 +568,6 @@ def masked_whiten(values: torch.Tensor, mask: torch.Tensor, shift_mean: bool = T
 
 
 
-
-def init_dist(args):
-    node_list = os.environ['SLURM_NODELIST']
-    num_gpus = torch.cuda.device_count()
-    args.global_rank = int(os.environ['SLURM_PROCID'])
-    args.local_rank = args.global_rank % num_gpus
-    # args.world_size = int(os.environ['SLURM_NTASKS'])
-    args.world_size = 8
-
-    os.environ['WORLD_SIZE'] = str(args.world_size)
-    os.environ['RANK'] = str(args.global_rank)
-    addr = os.environ['MASTER_ADDR']
-    port = os.environ['MASTER_PORT']
-    dist.init_process_group(backend='nccl')
-    torch.cuda.set_device(args.local_rank)
-    print(f"proc_id: {args.global_rank}; local_rank: {args.local_rank}; node_list: {node_list}; num_gpus: {num_gpus}; addr: {addr}; port: {port}")
-    print("CUDA available:", torch.cuda.is_available())
-    print("Number of GPUs:", torch.cuda.device_count())
-    return args
-
-
 def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
 
     # init_dist(args)
@@ -500,14 +621,16 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
         tokenizer.add_special_tokens({"pad_token": "[PAD]"})  # NOTE: we do not resize the embedding
     tokenizer.chat_template = CHAT_TEMPLATES[dataset_config.chat_template]
 
+
     # create the dataset
     dataset_dict = DatasetDict()
     dataset_processor = SFTDatasetProcessor(tokenizer=tokenizer, config=dataset_config)
     train_dataset = combine_dataset(
         args.dataset_mixer_dict,
         splits=args.dataset_train_splits,
-        columns_to_keep=[dataset_config.sft_messages_key],
+        columns_to_keep=[dataset_config.sft_prompt_key],
     )
+
     if dataset_config.sanity_check:
         train_dataset = train_dataset.select(
             range(0, min(len(train_dataset), dataset_config.sanity_check_max_samples))
@@ -521,7 +644,7 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
         eval_dataset = combine_dataset(
             args.dataset_eval_mixer_dict,
             splits=args.dataset_eval_splits,
-            columns_to_keep=[dataset_config.sft_messages_key],
+            columns_to_keep=[dataset_config.sft_prompt_key],
         )
         eval_dataset = eval_dataset.select(range(0, min(len(eval_dataset), dataset_config.sanity_check_max_samples)))
         with accelerator.main_process_first():
@@ -532,6 +655,7 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
     # some more runtime logging
     if accelerator.is_main_process:
         pprint([args, dataset_config, model_config])
+        
         visualize_token(train_dataset[0][INPUT_IDS_PROMPT_KEY], tokenizer)
         if args.with_tracking:
             # upload the visualized token length
@@ -704,14 +828,19 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
         LOCAL_NUM_EVAL_SAMPLES = 4
         num_eval_samples = LOCAL_NUM_EVAL_SAMPLES * accelerator.num_processes
         sample_evaluation_prompt_token_ids = None
-        if eval_dataset is not None:
-            sample_evaluation_prompt_token_ids = eval_dataset[:num_eval_samples][INPUT_IDS_PROMPT_KEY]
+        print(f'this is eval_dataset: {eval_dataset}')
+        if eval_dataset is None:
+            ifeval_inputs = read_prompt_list("data/eval/ifeval/input_data.jsonl")
+            # sample_evaluation_prompt_token_ids = eval_dataset[:num_eval_samples][INPUT_IDS_PROMPT_KEY]
+            sample_evaluation_prompt_token_ids = tokenizer(
+                [inp.prompt for inp in ifeval_inputs], return_tensors="pt", padding=True, truncation=True
+            )["input_ids"]
         thread = threading.Thread(
             target=vllm_generate,
             args=(
                 model_config.model_name_or_path,
                 model_config.model_revision,
-                dataset_config.max_prompt_token_lenth + args.response_length,
+                dataset_config.max_prompt_token_length + args.response_length,
                 args.vllm_device,
                 args.vllm_gpu_memory_utilization,
                 generation_config,
@@ -760,21 +889,52 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
 
         if accelerator.is_main_process:
             try:
-                evaluation_responses = evaluation_Q.get(timeout=0.01)
+                # print(f'we are getting samples from eval q')
+                evaluation_response_ids = evaluation_Q.get()
+                # print(f'🔥🔥🔥 Evaluation responses received: {len(evaluation_response_ids)}')
+                # Decode
+                prompts = tokenizer.batch_decode(sample_evaluation_prompt_token_ids, skip_special_tokens=True)
+                completions = tokenizer.batch_decode(evaluation_response_ids, skip_special_tokens=True)
+                completions = [c.replace(tokenizer.pad_token, "") for c in completions]
+                # print(f'🔥🔥🔥 Evaluation responses decoded: {len(completions)}')
+                # print first sample of completions
+                # print(f'🔥🔥🔥 First sample of completions: {completions[0]}')
+                # Evaluation
+                strict_outputs = [
+                    test_instruction_following_strict(inp, completions[i])
+                    for i, inp in enumerate(ifeval_inputs)
+                ]
+                loose_outputs = [
+                    test_instruction_following_loose(inp, completions[i])
+                    for i, inp in enumerate(ifeval_inputs)
+                ]
+                print(f'strict_outputs: {len(strict_outputs)}, loose_outputs: {len(loose_outputs)}')
+                acc_strict = sum(o.follow_all_instructions for o in strict_outputs) / len(strict_outputs)
+                acc_loose = sum(o.follow_all_instructions for o in loose_outputs) / len(loose_outputs)
+
+                # Logging
                 print("🔥🔥🔥 Evaluation responses received")
-                table = {}
-                table["prompt"] = tokenizer.batch_decode(sample_evaluation_prompt_token_ids)
-                table["response"] = tokenizer.batch_decode(evaluation_responses)
-                table["response"] = [item.replace(tokenizer.pad_token, "") for item in table["response"]]
+                print(f"📊 IFEVAL strict accuracy: {acc_strict:.4f}")
+                print(f"📊 IFEVAL loose  accuracy: {acc_loose:.4f}")
+
+                table = {
+                    "prompt": prompts,
+                    "response": completions,
+                }
                 df = pd.DataFrame(table)
-                print_rich_table(df)
+
                 if args.with_tracking:
-                    wandb.log({"sample_completions": wandb.Table(dataframe=df)})
+                    wandb.log({
+                        "sample_completions": wandb.Table(dataframe=df),
+                        "ifeval/acc_strict": acc_strict,
+                        "ifeval/acc_loose": acc_loose,
+                    })
                 else:
                     print_rich_table(df)
-                del table
+
             except Empty:
                 print("🙈 Evaluation responses not received")
+
 
         with unwrap_model_for_generation(model, accelerator) as unwrapped_model:
             # (optionally) evaluate the model
@@ -866,8 +1026,9 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
                     reward_models = [reward_model, reward_model]
                     postprocessed_query_response = torch.cat((query, postprocessed_response), 1)
                     sequence_length = first_true_indices(postprocessed_response == tokenizer.pad_token_id) - 1
-                    # Print type of postprocessed_query_response, len of it
                     # print(f'postprocessed_query_response: {type(postprocessed_query_response)} {len(postprocessed_query_response)}')
+                    decoded_query_response = tokenizer.batch_decode(postprocessed_query_response)
+                    # print(f'decoded_query_response: {decoded_query_response}')
                     extra_info = tokenizer.decode(postprocessed_query_response[0])
                     # print(f'extra_info: {extra_info}')
                     _, score, _ = get_reward(
@@ -886,8 +1047,9 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
                         _, eval_score, _ = get_reward(
                             eval_rm, eval_query_response, eval_tokenizer.pad_token_id, context_length
                         )
-                    # print(f'score: {score} {score.shape}, full_value: {full_value} {full_value.shape}')
-                    # print('--------------')
+
+
+
                     value = full_value[:, context_length - 1 : -1].squeeze(-1)
 
                     responses.append(response)
@@ -971,7 +1133,9 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
 
                 advantages = masked_whiten(advantages, ~padding_mask)
                 advantages = torch.masked_fill(advantages, padding_mask, 0)
+                # end of rollout computation
                 torch.cuda.empty_cache()
+
 
         # Do multiple epochs of training on on-policy data (PPO-style), with a fresh random shuffle in each epoch
         for epoch_idx in range(args.num_epochs):
@@ -1067,7 +1231,7 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
             local_metrics[14] = ratio_stats.var()
             local_metrics[15] = ((kl) ** 2 / 2).sum(1).mean()
             local_metrics[16] = ((-kl).exp() - 1 + kl).sum(1).mean()
-            print('logging infor of eval rm')
+            
             if args.evalrm_name_or_path is not None:
                 eval_scores = torch.cat(eval_scores, 0)
                 local_metrics[17] = eval_scores.mean()
@@ -1097,6 +1261,32 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
                 "val/ratio": global_metrics[13],
                 "val/ratio_var": global_metrics[14],
             }
+            # Append IFEVAL results (if exist)
+            base_model = os.path.basename(model_config.model_name_or_path)                    # e.g. "llama3-1b_finetuned"
+            dataset_name = args.dataset_mixer
+            dataset = dataset_name.split('/')[-1].split('_')[0]  # → "ultrafeedback"
+            strategy = "lora" if args.use_lora else "nolora"
+
+
+            output_dir_name = generate_model_name(
+                model_type="lm",
+                base_model=base_model,
+                dataset=dataset,
+                method=args.method,
+                strategy=strategy,
+                run_id=args.run_id
+            )
+            output_dirr = os.path.join("models", args.method, output_dir_name)
+
+            ifeval_metrics_path = os.path.join(output_dirr, f"ifeval_results/step_{training_step}/metrics.json")
+            if os.path.exists(ifeval_metrics_path):
+                try:
+                    with open(ifeval_metrics_path, "r") as f:
+                        ifeval_result = json.load(f)
+                    metrics["ifeval/acc_loose"] = ifeval_result["loose"]["Accuracy"]
+                    metrics["ifeval/acc_strict"] = ifeval_result["strict"]["Accuracy"]
+                except Exception as e:
+                    print(f"⚠️ Failed to load IFEVAL results: {e}")
             if args.evalrm_name_or_path is not None:
                 metrics["objective/eval_scores"] = global_metrics[17]
             if accelerator.is_main_process:
@@ -1117,10 +1307,45 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
 
     if not ph.preemptied:
         # save model
-        os.makedirs(os.path.dirname(args.output_dir), exist_ok=True)
+        # Auto-create output dir name
+
+        base_model = os.path.basename(model_config.model_name_or_path)                    # e.g. "llama3-1b_finetuned"
+        dataset_name = args.dataset_mixer
+        dataset = dataset_name.split('/')[-1].split('_')[0]  # → "ultrafeedback"
+        strategy = "lora" if args.use_lora else "nolora"
+
+
+        output_dir_name = generate_model_name(
+            model_type="lm",
+            base_model=base_model,
+            dataset=dataset,
+            method=args.method,
+            strategy=strategy,
+            run_id=args.run_id
+        )
+        args.output_dir = os.path.join("models", args.method, output_dir_name)
+
+        os.makedirs(args.output_dir, exist_ok=True)
         original_tokenizer = AutoTokenizer.from_pretrained(
             model_config.model_name_or_path, revision=model_config.model_revision
         )
+
+
+        # Set args.output_dir automatically
+
+        # Optionally: write a readme file
+        write_readme(
+            output_dir=args.output_dir,
+            base_model=model_config.model_name_or_path,
+            dataset=dataset,
+            method=args.method,
+            learning_rate=args.learning_rate,
+            total_steps=args.total_episodes,  # or num_updates, whatever applies
+            strategy=strategy,
+            extra_info={"run_id": args.run_id, "reward_model": args.reward_model_path}
+        )
+
+
         print(f'Saving the model to {args.output_dir}')
         save_with_accelerate(
             accelerator,

@@ -65,6 +65,8 @@ from open_instruct.model_utils import (
     save_with_accelerate,
     truncate_response,
     unwrap_model_for_generation,
+    write_readme,
+    generate_model_name
 )
 from open_instruct.utils import (
     ArgumentParserPlus,
@@ -105,7 +107,10 @@ class Args:
     """Seed of the experiment"""
     run_name: Optional[str] = None
     """A unique name of this run"""
-
+    method: str = 'mdpo'
+    """The method to use for training"""
+    use_lora: bool = False
+    """Whether to use LoRA"""
     # optimizer args
     eps: float = 1e-5
     """The epsilon value for the optimizer"""
@@ -200,7 +205,7 @@ class Args:
     kl_estimator: Literal["kl1", "kl2", "kl3"] = "kl1"
 
     # MDPO specific args
-    outer_lr: float = 0.01
+    outer_lr: float = 0.05
 
     # vLLM settings. NOTE: currently we need to place the vLLM model on a separate GPU
     # for generation to work properly because vLLM would pre-alocate the memory.
@@ -208,7 +213,7 @@ class Args:
     # the vLLM model is placed on the correct GPU.
     vllm_device: str = "cuda:1"
     """the device placement of the vllm model; typically we place the vllm model on a decicated GPU"""
-    vllm_gpu_memory_utilization: float = 0.8
+    vllm_gpu_memory_utilization: float = 0.92
     """the GPU memory utilization of the vllm model; passed to `gpu_memory_utilization` to the `vLLM` instance"""
     # async setting
     async_mode: bool = True
@@ -219,11 +224,13 @@ class Args:
     """The name or path of the evaluation reward model"""
 
     # wandb and HF tracking configs
+    run_id: str = None
+    """The run id of the experiment"""
     with_tracking: bool = False
     """If toggled, this experiment will be tracked with Weights and Biases"""
     wandb_project_name: str = "open_instruct_ppo"
     """The wandb's project name"""
-    wandb_run_name: str = "ppo_tuluv2_7b"
+    wandb_run_name: str = "mdpo_tuluv2_7b"
     """The wandb run's name"""
     wandb_entity: Optional[str] = 'roozbeh-n99'
     """The entity (team) of wandb's project"""
@@ -326,16 +333,18 @@ def vllm_generate(
     resume_training_step: int,
 ):
     vllm_single_gpu_patch()
+    print(f'max_mdoel_len: {max_model_len}')
     llm = LLM(
         model=model_name_or_path,
         revision=model_revision,
+        dtype="float16",
         tokenizer_revision=model_revision,
         tensor_parallel_size=1,
         device=vllm_device,
         gpu_memory_utilization=vllm_gpu_memory_utilization,
         max_model_len=max_model_len,
     )
-    print("🔥🔥🔥 🍆🍆🍆vllm loaded")
+    print("🔥🔥🔥 vllm loaded")
     llmp = llm.llm_engine.model_executor.driver_worker.model_runner.model
     for training_step in range(resume_training_step, num_training_steps + 1):
         items = param_prompt_Q.get()
@@ -430,32 +439,12 @@ def masked_whiten(values: torch.Tensor, mask: torch.Tensor, shift_mean: bool = T
 
 
 
-def init_dist(args):
-    node_list = os.environ['SLURM_NODELIST']
-    num_gpus = torch.cuda.device_count()
-    args.global_rank = int(os.environ['SLURM_PROCID'])
-    args.local_rank = args.global_rank % num_gpus
-    # args.world_size = int(os.environ['SLURM_NTASKS'])
-    args.world_size = 8
-
-    os.environ['WORLD_SIZE'] = str(args.world_size)
-    os.environ['RANK'] = str(args.global_rank)
-    addr = os.environ['MASTER_ADDR']
-    port = os.environ['MASTER_PORT']
-    dist.init_process_group(backend='nccl')
-    torch.cuda.set_device(args.local_rank)
-    print(f"proc_id: {args.global_rank}; local_rank: {args.local_rank}; node_list: {node_list}; num_gpus: {num_gpus}; addr: {addr}; port: {port}")
-    print("CUDA available:", torch.cuda.is_available())
-    print("Number of GPUs:", torch.cuda.device_count())
-    return args
 
 
 def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
 
-    # init_dist(args)
     accelerator = calculate_runtime_args_and_accelerator(args, model_config)
     local_seed = args.seed + accelerator.process_index
-    subprocess.run(['nvidia-smi'], shell=True)
 
 
     # set up experiment tracking and seeds
@@ -509,22 +498,26 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
     train_dataset = combine_dataset(
         args.dataset_mixer_dict,
         splits=args.dataset_train_splits,
-        columns_to_keep=[dataset_config.sft_messages_key],
+        columns_to_keep=[dataset_config.sft_prompt_key],
     )
+    print(f'11 train_dataset[0]: {train_dataset[0]}')
+
     if dataset_config.sanity_check:
         train_dataset = train_dataset.select(
             range(0, min(len(train_dataset), dataset_config.sanity_check_max_samples))
         )
     with accelerator.main_process_first():
         train_dataset = dataset_processor.tokenize(train_dataset)
+
         train_dataset = dataset_processor.filter(train_dataset)
+    print(f'22 train_dataset[0]: {train_dataset[0]}')
     dataset_dict["train"] = train_dataset
     eval_dataset = None
     if args.dataset_eval_mixer is not None:
         eval_dataset = combine_dataset(
             args.dataset_eval_mixer_dict,
             splits=args.dataset_eval_splits,
-            columns_to_keep=[dataset_config.sft_messages_key],
+            columns_to_keep=[dataset_config.sft_prompt_key],
         )
         eval_dataset = eval_dataset.select(range(0, min(len(eval_dataset), dataset_config.sanity_check_max_samples)))
         with accelerator.main_process_first():
@@ -585,13 +578,13 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
         )
         eval_tokenizer = AutoTokenizer.from_pretrained(args.evalrm_name_or_path, padding_side="right")
 
-    if policy.config.vocab_size != reward_model.config.vocab_size:
-        raise ValueError(
-            "Policy and reward model must have the same vocab size. "
-            f"Policy: {policy.config.vocab_size}, Reward: {reward_model.config.vocab_size}. "
-            "If they don't have the same vocab size, the policy could generate tokens which "
-            "is going to cause index out of bound error in the reward model."
-        )
+    # if policy.config.vocab_size != reward_model.config.vocab_size:
+    #     raise ValueError(
+    #         "Policy and reward model must have the same vocab size. "
+    #         f"Policy: {policy.config.vocab_size}, Reward: {reward_model.config.vocab_size}. "
+    #         "If they don't have the same vocab size, the policy could generate tokens which "
+    #         "is going to cause index out of bound error in the reward model."
+    #     )
 
     model = PolicyAndValueWrapper(policy, value_model)
     if model_config.gradient_checkpointing:
@@ -709,12 +702,13 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
         sample_evaluation_prompt_token_ids = None
         if eval_dataset is not None:
             sample_evaluation_prompt_token_ids = eval_dataset[:num_eval_samples][INPUT_IDS_PROMPT_KEY]
+
         thread = threading.Thread(
             target=vllm_generate,
             args=(
                 model_config.model_name_or_path,
                 model_config.model_revision,
-                dataset_config.max_prompt_token_lenth + args.response_length,
+                dataset_config.max_prompt_token_length + args.response_length,
                 args.vllm_device,
                 args.vllm_gpu_memory_utilization,
                 generation_config,
@@ -836,12 +830,7 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
                     query = queries[i : i + args.local_rollout_forward_batch_size]
                     query_response = query_responses[i : i + args.local_rollout_forward_batch_size]
                     response = query_response[:, context_length:]
-                    query_str = tokenizer.decode(query[0])
-                    query_response_str = tokenizer.decode(query_response[0])
-                    response_str = tokenizer.decode(response[0])
-                    # print(f'query_str: {query_str}, query_response_str: {query_response_str}, response_str: {response_str}')
-                    # Print shape of query_response, query, response
-                    # print(f'query_response: {query_response.shape}, query: {query.shape}, response: {response.shape}')
+                    
                     output = forward(generation_model, query_response, tokenizer.pad_token_id)
                     logits = output.logits[:, context_length - 1 : -1]
                     logits /= args.temperature + 1e-7
@@ -849,6 +838,18 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
                     logprob = torch.gather(all_logprob, 2, response.unsqueeze(-1)).squeeze(-1)
                     del output, logits, all_logprob
                     torch.cuda.empty_cache()
+
+                    # # Print the first sample in the mini-batch
+                    # idx = 0  # you can change this to print others in the batch
+
+                    # query_ids = query[idx]
+                    # response_ids = response[idx]
+                    # full_sequence_ids = query_response[idx]
+
+                    # # Decode all
+                    # print("\n🟦 QUERY:", repr(tokenizer.decode(query_ids, skip_special_tokens=False)))
+                    # print("🟩 RESPONSE:", repr(tokenizer.decode(response_ids, skip_special_tokens=False)))
+                    # print("🟪 FULL SEQUENCE:", repr(tokenizer.decode(full_sequence_ids, skip_special_tokens=False)))
 
                     ref_output = forward(ref_model, query_response, tokenizer.pad_token_id)
                     ref_logits = ref_output.logits[:, context_length - 1 : -1]
@@ -869,10 +870,7 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
                     reward_models = [reward_model, reward_model]
                     postprocessed_query_response = torch.cat((query, postprocessed_response), 1)
                     sequence_length = first_true_indices(postprocessed_response == tokenizer.pad_token_id) - 1
-                    # Print type of postprocessed_query_response, len of it
-                    # print(f'postprocessed_query_response: {type(postprocessed_query_response)} {len(postprocessed_query_response)}')
                     extra_info = tokenizer.decode(postprocessed_query_response[0])
-                    # print(f'extra_info: {extra_info}')
                     _, score, _ = get_reward(
                         reward_model, postprocessed_query_response, tokenizer.pad_token_id, context_length
                     )
@@ -880,17 +878,13 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
                     full_value, _, _ = get_reward(
                         unwrapped_value_model, query_response, tokenizer.pad_token_id, context_length
                     )
-                    # tell me something. Is query a text or list of integers?  
                     if args.evalrm_name_or_path is not None:
-                        # print('getting score for eval_rm')
                         decoded_query_response = tokenizer.batch_decode(postprocessed_query_response)
-                        # print(f'decoded_query_response: {decoded_query_response}')
                         eval_query_response = eval_tokenizer(decoded_query_response, padding="max_length", max_length=512, truncation=True, return_tensors="pt")["input_ids"].to(device)
                         _, eval_score, _ = get_reward(
                             eval_rm, eval_query_response, eval_tokenizer.pad_token_id, context_length
                         )
-                    # print(f'score: {score} {score.shape}, full_value: {full_value} {full_value.shape}')
-                    # print('--------------')
+
                     value = full_value[:, context_length - 1 : -1].squeeze(-1)
 
                     responses.append(response)
@@ -949,6 +943,9 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
                 non_score_reward = -args.beta * kl
                 non_score_reward_sum = non_score_reward.sum(1)
                 rlhf_reward = scores + non_score_reward_sum
+                """MDPO"""
+                rlhf_reward = scores
+                """mdpo"""
                 rewards = non_score_reward.clone()
                 actual_start = torch.arange(rewards.size(0), device=rewards.device)
                 actual_end = torch.where(sequence_lengths_p1 < rewards.size(1), sequence_lengths_p1, sequence_lengths)
@@ -970,11 +967,12 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
                     advantages_reversed.append(lastgaelam)
                 advantages = torch.stack(advantages_reversed[::-1], axis=1)
                 returns = advantages + values
-                print(f'advantages.shape: {advantages.shape}, returns.shape: {returns.shape}, ')
+                # print(f'advantages.shape: {advantages.shape}, returns.shape: {returns.shape}, ')
 
                 advantages = masked_whiten(advantages, ~padding_mask)
                 advantages = torch.masked_fill(advantages, padding_mask, 0)
                 torch.cuda.empty_cache()
+                ref_logprobs_buffer = ref_logprobs.clone()  # shape: [B, T]
 
         # Do multiple epochs of training on on-policy data (PPO-style), with a fresh random shuffle in each epoch
         for epoch_idx in range(args.num_epochs):
@@ -1014,43 +1012,36 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
                         vf_loss = 0.5 * masked_mean(vf_loss_max, ~padding_mask_p1[micro_batch_inds])
                         logprobs_diff = new_logprobs - mb_logprobs
                         ratio = torch.exp(logprobs_diff)
-
+                        mb_ref_logprobs = ref_logprobs_buffer[micro_batch_inds]
 
                         """MDPO"""
                         # Compute the probability ratio as before
                         logprobs_diff = new_logprobs - mb_logprobs
                         ratio = torch.exp(logprobs_diff)
-                        
+                        kl_div = torch.mean(new_logprobs - mb_ref_logprobs)
+                        # print new_logprobs.shape and mb_ref_logprobs.shape
+                        # print(f'new_logprobs.shape: {new_logprobs.shape}, mb_ref_logprobs.shape: {mb_ref_logprobs.shape}')
+
                         # Compute KL divergence between new and reference policies over this minibatch.
                         # Here, we assume that ref_logprobs contains the log probabilities from your reference policy.
                         # Make sure that ref_logprobs[micro_batch_inds] is aligned with new_logprobs.
-                        kl_div = torch.mean(new_logprobs - ref_logprobs[micro_batch_inds])
                         
                         # MDPO objective: expected advantage minus a KL penalty weighted by args.outer_lr.
-                        # (args.outer_lr here plays the role of the KL penalty coefficient.)
                         mdpo_obj = torch.mean(ratio * mb_advantage) - args.outer_lr * kl_div
                         
                         # The loss is the negative of the MDPO objective.
                         pg_loss = -mdpo_obj
                         loss = pg_loss + args.vf_coef * vf_loss
 
-                        """MDPO"""
-                        # subprocess.run(['nvidia-smi'], shell=True)
+                        """mdpo"""
 
-                        # global_rank = accelerator.process_index
-                        # local_rank = accelerator.local_process_index
-                        # world_size = accelerator.num_processes
-
-                        # print(f'Global Rank: {global_rank}')
-                        # print(f'Local Rank: {local_rank}')
-                        # print(f'World Size: {world_size}')
 
                         accelerator.backward(loss)
                         optimizer.step()
                         optimizer.zero_grad()
                         """MDPO"""
-                        ref_model.load_state_dict(policy.state_dict(), strict=False)
-                        """MDPO"""
+                        # ref_model.load_state_dict(policy.state_dict(), strict=False)
+                        """mdpo"""
                         with torch.no_grad():
                             prob_dist = torch.nn.functional.softmax(logits, dim=-1)
                             entropy = torch.logsumexp(logits, dim=-1) - torch.sum(prob_dist * logits, dim=-1)
@@ -1089,7 +1080,6 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
             local_metrics[14] = ratio_stats.var()
             local_metrics[15] = ((kl) ** 2 / 2).sum(1).mean()
             local_metrics[16] = ((-kl).exp() - 1 + kl).sum(1).mean()
-            print('logging infor of eval rm')
             if args.evalrm_name_or_path is not None:
                 eval_scores = torch.cat(eval_scores, 0)
                 local_metrics[17] = eval_scores.mean()
@@ -1137,19 +1127,51 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
 
     if not ph.preemptied:
         # save model
-        os.makedirs(os.path.dirname(args.output_dir), exist_ok=True)
+        # Auto-create output dir name
+
+        base_model = os.path.basename(model_config.model_name_or_path)                    # e.g. "llama3-1b_finetuned"
+        dataset_name = args.dataset_mixer
+        dataset = dataset_name.split('/')[-1].split('_')[0]  # → "ultrafeedback"
+        strategy = "lora" if args.use_lora else "nolora"
+
+        output_dir_name = generate_model_name(
+            model_type="lm",
+            base_model=base_model,
+            dataset=dataset,
+            method=args.method,
+            strategy=strategy,
+            run_id=args.run_id
+        )
+        output_dir = os.path.join("models", args.method, output_dir_name)
+
+        os.makedirs(output_dir, exist_ok=True)
         original_tokenizer = AutoTokenizer.from_pretrained(
             model_config.model_name_or_path, revision=model_config.model_revision
         )
-        print(f'Saving the model to {args.output_dir}')
+
+        print(f'output_dir: {output_dir}')
+
+        # Optionally: write a readme file
+        write_readme(
+            output_dir=output_dir,
+            base_model=model_config.model_name_or_path,
+            dataset=dataset,
+            method=args.method,
+            learning_rate=args.learning_rate,
+            total_steps=args.total_episodes,  # or num_updates, whatever applies
+            strategy=strategy,
+            extra_info={"run_id": args.run_id, "reward_model": args.reward_model_path}
+        )
+
+
+        print(f'Saving the model to {output_dir}')
         save_with_accelerate(
             accelerator,
             model,
             original_tokenizer,
-            args.output_dir,
+            output_dir,
             model_attribute_to_save="policy",
         )
-
         # # Ai2 specific logic
         # if is_beaker_job() and accelerator.is_main_process:
         #     if args.hf_metadata_dataset:

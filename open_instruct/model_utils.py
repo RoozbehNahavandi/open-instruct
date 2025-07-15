@@ -15,6 +15,7 @@
 
 
 import itertools
+import logging
 from collections import OrderedDict, defaultdict
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -23,6 +24,9 @@ import os
 from abc import abstractclassmethod
 import random
 from datasets import load_dataset
+from datetime import datetime
+from pathlib import Path
+import hashlib
 
 try:
     import deepspeed
@@ -42,8 +46,10 @@ from rich.table import Table
 from torch.nn.parallel.distributed import DistributedDataParallel
 from transformers import PreTrainedModel, PreTrainedTokenizer
 from typing import Any, List, Dict
+from open_instruct.ground_truth_utils import REWARD_FN_MAPPING
 
 from open_instruct.utils import retry_on_exception
+logger = logging.getLogger(__name__)
 
 
 @dataclass(init=True)
@@ -128,8 +134,6 @@ class ModelConfig:
     """The model checkpoint for weights initialization."""
     model_revision: Optional[str] = None
     """The specific model version to use (can be a branch name, tag name or commit id)."""
-    trust_remote_code: bool = False
-    """Trust remote code when loading a model."""
     torch_dtype: Optional[str] = None
     """Override the default `torch.dtype` and load the model under this dtype."""
     attn_implementation: Optional[Literal["flash_attention_2"]] = None
@@ -217,10 +221,8 @@ def first_true_indices(bools: torch.Tensor, dtype=torch.long) -> torch.Tensor:
     return torch.min(zero_or_index, dim=-1).values
 
 
-
-
 def get_reward(
-    model: torch.nn.Module, query_responses: torch.Tensor, pad_token_id: int, context_length: int, weights: List[int] = [1]
+    model: torch.nn.Module, query_responses: torch.Tensor, pad_token_id: int, context_length: int
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     This function computes reward scores for a batch of query responses based on a pre-trained reward model.
@@ -251,10 +253,7 @@ def get_reward(
     position_ids = attention_mask.cumsum(1) - attention_mask.long()  # exclusive cumsum
 
     # Access the LM backbone from the reward model using its base model prefix
-    if not hasattr(model, 'module'):
-        lm_backbone = getattr(model, model.base_model_prefix)
-    else:
-        lm_backbone = getattr(model.module, model.module.base_model_prefix)
+    lm_backbone = getattr(model, model.base_model_prefix)
 
     # Replace padding tokens with zeros in the input IDs (so padding tokens won't affect the model's processing)
     # Shape: (batch_size, sequence_length)
@@ -267,10 +266,7 @@ def get_reward(
         output_hidden_states=True,
         use_cache=False,  # otherwise mistral-based RM would error out
     )
-    if not hasattr(model, 'module'):
-        reward_logits = model.score(output.hidden_states[-1])  # (batch_size, sequence_length)
-    else:
-        reward_logits = model.module.score(output.hidden_states[-1])
+    reward_logits = model.score(output.hidden_states[-1])  # (batch_size, sequence_length)
 
     # Calculate the length of each sequence by finding the first occurrence of a padding token after the context
     # sequence_lengths shape: (batch_size,)
@@ -1051,6 +1047,20 @@ def save_with_accelerate(
     # customize model card (TODO (Costa): this can be prettier)
 
 
+@torch.compile(dynamic=True)
+def log_softmax_and_gather(logits: torch.Tensor, index: torch.Tensor) -> torch.Tensor:
+    """
+    torch compiled version of the common `log_softmax -> gather` operation.
+
+    The compiled version of this opration avoids the (significant) memory overhead of
+    allocating a new (batch_size, seq_len, vocab_size) tensor to store the logprobs.
+
+    See https://github.com/allenai/open-instruct/pull/584
+    """
+    logprobs = logits.log_softmax(dim=-1)
+    return torch.gather(logprobs, dim=-1, index=index.unsqueeze(-1)).squeeze(-1)
+
+
 @retry_on_exception()
 def push_folder_to_hub(
     accelerator: Accelerator,
@@ -1113,6 +1123,25 @@ def add_hooks(model: "DeepSpeedEngine") -> None:
         optimizer_offload = model.optimizer
     optimizer_offload._register_hooks_recursively(optimizer_offload.module)
 
+# @contextmanager
+# def unwrap_model_for_generation(model, accelerator, is_peft_model=False):
+#     unwrapped_model = accelerator.unwrap_model(model)
+#     if is_peft_model:
+#         unwrapped_model.pretrained_model.disable_adapter()
+
+#     if (
+#         getattr(accelerator.state, "deepspeed_plugin", None) is not None
+#         and accelerator.state.deepspeed_plugin.zero_stage == 3
+#     ):
+#         if accelerator.is_main_process:
+#             with deepspeed.zero.GatheredParameters(model.parameters(), modifier_rank=0):
+#                 remove_hooks(model)
+#                 yield unwrapped_model
+#                 add_hooks(model)
+#         else:
+#             yield None  # Prevent non-zero ranks from triggering model load
+#     else:
+#         yield unwrapped_model
 
 @contextmanager
 def unwrap_model_for_generation(
@@ -1245,3 +1274,106 @@ def exact_div(a, b, custom_error_message=""):
     if a != q * b:
         raise ValueError(f"{custom_error_message}, inexact division: {a} / {b} = {a / b}")
     return q
+
+
+
+
+def get_run_id():
+    """Returns a short unique ID based on time."""
+    return datetime.now().strftime("run%H%M%S")  # e.g., run154830
+
+
+def generate_model_name(
+    *,
+    model_type,        # 'lm' or 'rm'
+    base_model,        # 'llama3-8b'
+    dataset,           # 'tulu', 'hh', etc.
+    method,            # 'sft', 'ppo', 'mdpo', 'dpo', etc.
+    strategy=None,     # 'lora', 'nolora', etc.
+    date=None,         # default = today
+    run_id=None        # default = generated short uid
+):
+    date = date or datetime.now().strftime("%Y-%m-%d")
+    run_id = run_id or get_run_id()
+
+    name_parts = [model_type, base_model, dataset, method]
+    if strategy:
+        name_parts.append(strategy)
+    name_parts += [date, run_id]
+    return "_".join(name_parts)
+
+
+def write_readme(
+    output_dir,
+    base_model,
+    dataset,
+    method,
+    learning_rate,
+    total_steps,
+    strategy=None,
+    extra_info=None,
+):
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    lines = [
+        f"# Model Metadata",
+        f"- **Saved at**: {timestamp}",
+        f"- **Base model**: {base_model}",
+        f"- **Dataset**: {dataset}",
+        f"- **Method**: {method}",
+        f"- **Strategy**: {strategy or 'none'}",
+        f"- **Learning rate**: {learning_rate}",
+        f"- **Total steps**: {total_steps}",
+    ]
+    if extra_info:
+        for k, v in extra_info.items():
+            lines.append(f"- **{k}**: {v}")
+    readme_path = Path(output_dir) / "README.md"
+    with open(readme_path, "w") as f:
+        f.write("\n".join(lines))
+
+
+
+def apply_verifiable_reward(
+    responses: List[torch.Tensor],
+    decoded_responses: List[str],
+    ground_truths: List[str],
+    datasets: List[Union[str, List[str]]],
+    reward_mult: int = 10,
+):
+    rewards = []
+    per_func_rewards = []
+    for tok_prediction, prediction, ground_truth, dataset in zip(
+        responses, decoded_responses, ground_truths, datasets
+    ):
+        # allow multiple ground truths and datasets for a single response
+        if isinstance(ground_truth, str):
+            ground_truth_list = [ground_truth]
+        else:
+            ground_truth_list = ground_truth
+        if isinstance(dataset, str):
+            dataset_list = [dataset]
+        else:
+            dataset_list = dataset
+        assert len(ground_truth_list) == len(dataset_list), "Ground truth and dataset list lengths do not match."
+        # for now, we just assume rewards are additive, rather than more complex functions.
+        reward = 0
+        per_func_reward = {}
+        for gt, ds in zip(ground_truth_list, dataset_list):
+            reward_func = REWARD_FN_MAPPING.get(ds.lower())
+            if reward_func is None:
+                logger.warning("No reward function found for dataset %s. Skipping reward.", ds)
+                continue
+            reward_weight = reward_func.weight
+            # compare with ground truth.
+            # sometimes we need the tokenized pred.
+            reward_result = reward_func(
+                tokenized_prediction=tok_prediction,
+                prediction=prediction,
+                label=gt,
+            )
+            logger.info("Applying ground truth reward 🤗")
+            reward += reward_mult * reward_result * reward_weight
+            per_func_reward[ds] = per_func_reward.get(ds, 0) + (reward_mult * reward_result * reward_weight)
+        rewards.append(reward)
+        per_func_rewards.append(per_func_reward)
+    return rewards, per_func_rewards

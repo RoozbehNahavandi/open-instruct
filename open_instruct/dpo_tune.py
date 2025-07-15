@@ -534,7 +534,7 @@ def main(args: FlatArguments):
         raw_datasets = get_datasets(
             args.dataset_mixer,
             configs=args.dataset_config_name,
-            splits=["train"],
+            splits=["hh_rlhf_60k"],
             save_data_dir=args.dataset_mix_dir if accelerator.is_main_process else None,
             columns_to_keep=["chosen", "rejected"],
         )
@@ -543,7 +543,7 @@ def main(args: FlatArguments):
         raw_datasets = get_datasets(
             args.dataset_mixer_list,
             configs=args.dataset_config_name,
-            splits=["train"],
+            splits=["hh_rlhf_60k"],
             save_data_dir=args.dataset_mix_dir if accelerator.is_main_process else None,
             columns_to_keep=["chosen", "rejected"],
         )
@@ -557,7 +557,8 @@ def main(args: FlatArguments):
             data_files=data_files,
             **dataset_args,
         )
-
+    print(f'raw_dataset columns: {raw_datasets["train"].column_names}')
+    
     # Load pretrained model and tokenizer
     if args.config_name:
         config = AutoConfig.from_pretrained(
@@ -797,7 +798,8 @@ def main(args: FlatArguments):
         collate_fn=DataCollatorForSeq2SeqDPO(tokenizer=tokenizer, model=model, padding="longest"),
         batch_size=args.per_device_train_batch_size,
     )
-
+    print(f'train_dataset: {len(train_dataset)} examples')
+    print(f'train_dataset[0]: {train_dataset[0]}')
     # Optimizer
     # Split weights in two groups, one with weight decay and the other not.
     no_decay = ["bias", "layer_norm.weight"]
@@ -944,6 +946,13 @@ def main(args: FlatArguments):
         average_log_prob_loss_types = ["simpo", "dpo_norm"]
         average_log_prob = args.dpo_loss_type in average_log_prob_loss_types
         for step, batch in enumerate(active_dataloader):
+            if step >= 470:
+                print(f"\n🔍 Step {step}")
+                for k, v in batch.items():
+                    if isinstance(v, torch.Tensor):
+                        print(f"{k}: shape={v.shape}, dtype={v.dtype}, min={v.min().item()}, max={v.max().item()}")
+                    else:
+                        print(f"{k}: {type(v)}")
             episode += len(batch["chosen_input_ids"]) * accelerator.num_processes
             # dpo forward pass & loss
             with accelerator.accumulate(model):

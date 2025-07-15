@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # Reward model training
 
 `open_instruct/ppo_vllm_thread.py` contains the script for training PPO models.
@@ -88,10 +89,39 @@ python open_instruct/ppo_vllm_thread.py \
     --gradient_checkpointing \
     --with_tracking \
     --push_to_hub
+=======
+# Proximal Policy Optimization (PPO)
+
+
+
+## Implemented Variants
+
+- `open_instruct/grpo_vllm_thread_ray_gtrl.py` contains the script for training PPO models.
+
+
+
+## `ppo_vllm_thread_ray_gtrl.py`
+
+
+This implementation has the following features:
+
+- Uses a thread-based approach to parallelize the training and inference processes, based on [Asynchronous RLHF](https://arxiv.org/abs/2410.18252).
+- Uses vLLM and Ray to parallelize the training process, based on how [OpenRLHF](https://github.com/OpenRLHF/OpenRLHF) does it
+
+
+
+### Debug (Single GPU)
+
+You can run the script in a single GPU mode to debug the training process.
+
+```bash
+bash scripts/train/debug/ppo.sh
+>>>>>>> upstream/main
 ```
 
 
 
+<<<<<<< HEAD
 
 ### LEVEL 1: 8 GPU; TL;DR summarization
 
@@ -242,6 +272,16 @@ python mason.py \
 * Trained model: https://huggingface.co/vwxyzjn/ppo_vllm_thread_beta_0.03__allenai_open_instruct_dev/tree/ppo_vllm_thread_beta_0.03__1__1726282755
 
 
+=======
+### Reproduce `allenai/Llama-3.1-Tulu-3.1-8B` (2 Nodes)
+
+You can reproduce our `allenai/Llama-3.1-Tulu-3-8B` model by running the following command:
+
+```bash
+bash scripts/train/tulu3/ppo_8b.sh
+```
+
+>>>>>>> upstream/main
 ### Quality of life tools
 
 
@@ -261,6 +301,7 @@ Finally, we also include samples
 ![reward modeling preference sample texts](reward_modeling_preference_sample_texts.png)
 
 
+<<<<<<< HEAD
 ## Explanation of the logged metrics
 
 
@@ -279,6 +320,27 @@ Finally, we also include samples
 * `reward/chosen`: the implicit DPO reward of the chosen response
 * `reward/rejected`: the implicit DPO reward of the rejected response
 * `reward_margin`: the difference between the implicit PDO chosen reward and the implicit rejected reward
+=======
+### Training Metrics
+
+During training, the following metrics are logged:
+
+
+* `episode`: the global episode number training has gone through (e.g., `3000` means we have trained on 3000 data points already -- in the case of RLVR that is prompts, which can repeat)
+* `lr`: the current learning rate
+* `epoch`: the fraction or multiple of the epoch (e.g., `2.7` means we have trained on the dataset for 2 epochs and 70% of the third epoch)
+* `objective/kl`: the KL divergence between the current policy and the reference policy (sum of the KL divergence of each response token)
+* `objective/scores`: the scores of the current response, rated by a combination of reward model and other rewards (e.g., R1 style format reward, verifiable reward, etc.)
+* `objective/rlhf_reward`: the RLHF reward, which is `objective/scores` - `beta` * `objective/kl`
+* `objective/non_score_reward`: `beta` * `objective/kl`
+* `objective/entropy`: the entropy of the current policy
+* `objective/loss`: the PPO loss
+* `objective/verifiable_correct_rate`: the rate at which responses are verifiably correct, providing a measure of response accuracy
+* `loss/policy_avg`: the average policy loss, indicating the mean loss incurred during policy updates
+* `policy/approxkl_avg`: the average approximate KL divergence, used to monitor policy stability
+* `policy/clipfrac_avg`: the average fraction of updates where the policy was clipped, indicating how often clipping occurs
+* `policy/entropy_avg`: the average entropy of the policy, providing a measure of policy randomness
+>>>>>>> upstream/main
 * `time/from_scratch`: the time taken to train the model from scratch
 * `time/training`: the time taken to do one training step
 * `val/sequence_lengths`: the length of the sequences in the generated responses
@@ -346,11 +408,19 @@ for g in range(1, ITER + 1):
     if async_mode:
         if g != 1:
             next_queries = next(generator)
+<<<<<<< HEAD
         param_and_query_Q.put((agent.param, queries))
+=======
+        param_and_query_Q.put((agent.param, next_queries))
+>>>>>>> upstream/main
     else:
         if g != 1:
             next_queries = next(generator)
             param_and_query_Q.put((agent.param, next_queries)) # note the indent here is different
+<<<<<<< HEAD
+=======
+            queries = next_queries
+>>>>>>> upstream/main
     _, data = data_Q.get()
     old_param = agent.param
     agent.learn(data)
@@ -359,6 +429,7 @@ for g in range(1, ITER + 1):
 actor_thread.join()
 ```
 ```
+<<<<<<< HEAD
 [actor] generating data π_1 -> p_1 D_π_1
 [actor] generating data π_1 -> p_1 D_π_1
 --[leaner] get π_1 ->  p_1 D_π_1 -> π_2, time: 2.0022709369659424
@@ -376,3 +447,59 @@ actor_thread.join()
 ```
 
 
+=======
+# async_mode = True
+[actor] generating data π_1 -> p_1 D_π_1
+[actor] generating data π_1 -> p_1 D_π_1
+--[leaner] get π_1 ->  p_1 D_π_1 -> π_2, time: 2.0003671646118164
+[actor] generating data π_2 -> p_2 D_π_2
+--[leaner] get π_2 ->  p_1 D_π_1 -> π_3, time: 3.0012056827545166
+[actor] generating data π_3 -> p_3 D_π_3
+--[leaner] get π_3 ->  p_2 D_π_2 -> π_4, time: 4.001934766769409
+[actor] generating data π_4 -> p_4 D_π_4
+--[leaner] get π_4 ->  p_3 D_π_3 -> π_5, time: 5.002779722213745
+[actor] generating data π_5 -> p_5 D_π_5
+--[leaner] get π_5 ->  p_4 D_π_4 -> π_6, time: 6.003664970397949
+[actor] generating data π_6 -> p_6 D_π_6
+--[leaner] get π_6 ->  p_5 D_π_5 -> π_7, time: 7.004390716552734
+--[leaner] get π_7 ->  p_6 D_π_6 -> π_8, time: 8.00534439086914
+
+# async_mode = False
+[actor] generating data π_1 -> p_1 D_π_1
+--[leaner] get π_1 ->  p_1 D_π_1 -> π_2, time: 2.000866174697876
+[actor] generating data π_2 -> p_2 D_π_2
+--[leaner] get π_2 ->  p_2 D_π_2 -> π_3, time: 4.002583980560303
+[actor] generating data π_3 -> p_3 D_π_3
+--[leaner] get π_3 ->  p_3 D_π_3 -> π_4, time: 6.003793239593506
+[actor] generating data π_4 -> p_4 D_π_4
+--[leaner] get π_4 ->  p_4 D_π_4 -> π_5, time: 8.005346775054932
+[actor] generating data π_5 -> p_5 D_π_5
+--[leaner] get π_5 ->  p_5 D_π_5 -> π_6, time: 10.00696587562561
+[actor] generating data π_6 -> p_6 D_π_6
+--[leaner] get π_6 ->  p_6 D_π_6 -> π_7, time: 12.00776195526123
+[actor] generating data π_7 -> p_7 D_π_7
+--[leaner] get π_7 ->  p_7 D_π_7 -> π_8, time: 14.009297132492065
+```
+
+
+
+## Acknowledgements
+
+We would like to thank the following resources for PPO theory:
+
+- [Proximal Policy Optimization Algorithms](https://arxiv.org/abs/1707.06347)
+- [The N+ Implementation Details of RLHF with PPO: A Case Study on TL;DR Summarization](https://arxiv.org/abs/2403.17031)
+- [Asynchronous RLHF](https://arxiv.org/abs/2410.18252)
+
+We would like to thank the following resources for distributed Ray usage:
+
+- [OpenRLHF/OpenRLHF](https://github.com/OpenRLHF/OpenRLHF)
+
+
+We would like to thank the following projects for general infrastructure:
+
+- [vLLM](https://github.com/vllm-project/vllm)
+- [Ray](https://github.com/ray-project/ray)
+- [DeepSpeedAI/DeepSpeed](https://github.com/deepspeedai/DeepSpeed)
+- [HuggingFace/Transformers](https://github.com/huggingface/transformers)
+>>>>>>> upstream/main

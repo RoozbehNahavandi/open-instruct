@@ -217,7 +217,9 @@ def main(args):
     random.seed(42)
 
     inputs = read_prompt_list(os.path.join(args.data_dir, "input_data.jsonl"))
-
+    print(f"📥 Loaded {len(inputs)} IF eval inputs.")
+    print("📝 First raw prompt:")
+    print(inputs[0].prompt)
     os.makedirs(args.save_dir, exist_ok=True)
 
     # Load model if not using OpenAI API
@@ -267,6 +269,16 @@ def main(args):
         else:
             prompts = [inp.prompt for inp in inputs]
 
+        print(f"📤 Number of prompts passed to generation: {len(prompts)}")
+        print("📤 First prompt before generation:")
+        print(prompts[0])
+
+        # Tokenize manually to check input IDs
+        input_ids = tokenizer(prompts, return_tensors="pt", padding=True, truncation=True)["input_ids"]
+        print("🔢 Token IDs of first prompt:")
+        print(input_ids[0].tolist())
+        print("🔁 Decoded first prompt again:")
+        print(tokenizer.decode(input_ids[0], skip_special_tokens=True))
         # generate with vllm
         if args.use_vllm:
             sampling_params = vllm.SamplingParams(
@@ -291,6 +303,10 @@ def main(args):
                 batch_size=args.eval_batch_size if args.eval_batch_size else 1,
                 stop_id_sequences=[tokenizer.convert_tokens_to_ids(stop) for stop in args.additional_stop_sequence],
             )
+        print("🧪 [IFEVAL] First prompt:")
+        print(prompts[0])
+        print("🧪 [IFEVAL] First output:")
+        print(outputs[0])
     else:
         instances = []
         for i, inp in enumerate(inputs):

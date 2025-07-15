@@ -4,6 +4,7 @@ rejection_sampling/shards1
 token_length.png
 *.tfevents.*
 
+<<<<<<< HEAD
 results
 models
 wandb
@@ -12,6 +13,17 @@ split_data/*
 open_instruct/daily_dialog/
 data/*
 logs/*
+=======
+# for on policy preferences 
+birr/
+
+oe-eval-internal/
+
+results
+models
+wandb
+data/*
+>>>>>>> upstream/main
 # !data/processed
 output/
 configs/beaker_configs/auto_created
@@ -147,3 +159,8 @@ dmypy.json
 .pyre/
 
 .idea/
+<<<<<<< HEAD
+=======
+.vscode
+.DS_Store
+>>>>>>> upstream/main

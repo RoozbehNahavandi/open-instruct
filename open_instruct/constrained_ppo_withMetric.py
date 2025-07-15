@@ -541,7 +541,7 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
     train_dataset = combine_dataset(
         args.dataset_mixer_dict,
         splits=args.dataset_train_splits,
-        columns_to_keep=[dataset_config.sft_messages_key, dataset_config.preference_chosen_key, dataset_config.preference_rejected_key, 'meta_data'],
+        columns_to_keep=[dataset_config.sft_prompt_key, dataset_config.preference_chosen_key, dataset_config.preference_rejected_key, 'meta_data'],
     )
     if dataset_config.sanity_check:
         train_dataset = train_dataset.select(
@@ -556,7 +556,7 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
         eval_dataset = combine_dataset(
             args.dataset_eval_mixer_dict,
             splits=args.dataset_eval_splits,
-            columns_to_keep=[dataset_config.sft_messages_key, dataset_config.preference_chosen_key, dataset_config.preference_rejected_key, 'meta_data'],
+            columns_to_keep=[dataset_config.sft_prompt_key, dataset_config.preference_chosen_key, dataset_config.preference_rejected_key, 'meta_data'],
         )
         eval_dataset = eval_dataset.select(range(0, min(len(eval_dataset), dataset_config.sanity_check_max_samples)))
         with accelerator.main_process_first():
@@ -1032,6 +1032,20 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
                     meta_info = meta_data[i: i + args.local_rollout_forward_batch_size]
                     # what is the type of query and query_response and other variables? 
 
+                    # # Print the first sample in the mini-batch
+                    # idx = 0  # you can change this to print others in the batch
+
+                    # query_ids = query[idx]
+                    # response_ids = response[idx]
+                    # full_sequence_ids = query_response[idx]
+
+                    # # Decode all
+                    # print("\n🟦 QUERY:", repr(tokenizer.decode(query_ids, skip_special_tokens=False)))
+                    # print("🟩 RESPONSE:", repr(tokenizer.decode(response_ids, skip_special_tokens=False)))
+                    # print("🟪 FULL SEQUENCE:", repr(tokenizer.decode(full_sequence_ids, skip_special_tokens=False)))
+
+
+
                     output = forward(generation_model, query_response, tokenizer.pad_token_id)
                     logits = output.logits[:, context_length - 1 : -1]
                     logits /= args.temperature + 1e-7
@@ -1297,9 +1311,9 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
                         mb_constraint_return = constraints_returns[:, micro_batch_inds]
                         mb_values = values[micro_batch_inds]
                         mb_constraint_values = constraint_rm_values[:, micro_batch_inds]
-                        print(f'mb_constraint_advantages.shape: {mb_constraint_advantages.shape}')
-                        print(f'mb_advantage.shape: {mb_advantage.shape}')
-                        print(f'mb_constraint_return.shape: {mb_constraint_return.shape}')
+                        # print(f'mb_constraint_advantages.shape: {mb_constraint_advantages.shape}')
+                        # print(f'mb_advantage.shape: {mb_advantage.shape}')
+                        # print(f'mb_constraint_return.shape: {mb_constraint_return.shape}')
                         # shape of rewards: 
                         # mb_constraint_rewards = constraint_rewards[micro_batch_inds]
                         # mb_rewards = rewards[micro_batch_inds]
@@ -1310,6 +1324,7 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
                         lagrange = torch.sigmoid(lagrange_multipliers).view(-1, 1, 1)  # Detach Lagrange multipliers
                         # Compute Lagrange multipliers with sigmoid to bound them between 0 and 1
                         n_constraints = 2
+                        # print(f'mb_advantage.shape: {mb_advantage.shape}, mb_constraint_advantages.shape: {mb_constraint_advantages.shape}')
                         mixed_advantages = (n_constraints - lagrange.sum()) * mb_advantage + torch.sum(lagrange * mb_constraint_advantages, dim=0)
 
                         for sub_model in [
@@ -1613,47 +1628,7 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
             model_attribute_to_save="policy",
         )
 
-        # # Ai2 specific logic
-        # if is_beaker_job() and accelerator.is_main_process:
-        #     if args.hf_metadata_dataset:
-        #         dataset_list = list(args.dataset_mixer_dict.keys())
-        #         # mainly just focussing here on what would be useful for the leaderboard.
-        #         # wandb will have even more useful information.
-        #         metadata_blob = {
-        #             "model_name": args.exp_name,
-        #             "model_type": "sft",
-        #             "datasets": dataset_list,
-        #             "base_model": model_config.model_name_or_path,
-        #             "wandb_path": wandb.run.get_url(),
-        #             "beaker_experiment": beaker_config.beaker_experiment_url,
-        #             "beaker_datasets": beaker_config.beaker_dataset_id_urls,
-        #         }
-        #         upload_metadata_to_hf(
-        #             metadata_blob,
-        #             "metadata.json",
-        #             args.hf_metadata_dataset,
-        #             "results/" + args.hf_repo_revision,  # to match what the auto-evals name as.
-        #         )
 
-        #     if args.try_launch_beaker_eval_jobs and len(beaker_config.beaker_dataset_id_urls) > 0:
-        #         command = f"""\
-        #         python mason.py  \
-        #             --cluster ai2/allennlp-cirrascale ai2/general-cirrascale-a5000 ai2/general-cirrascale-a5000 ai2/s2-cirrascale ai2/general-cirrascale \
-        #             --priority low \
-        #             --preemptible \
-        #             --budget ai2/allennlp \
-        #             --workspace ai2/tulu-2-improvements \
-        #             --image nathanl/open_instruct_auto \
-        #             --pure_docker_mode \
-        #             --gpus 0 -- python scripts/wait_beaker_dataset_model_upload_then_evaluate_model.py \
-        #             --beaker_workload_id {beaker_config.beaker_workload_id} \
-        #             --model_name {args.hf_repo_revision}
-        #         """
-        #         process = subprocess.Popen(["bash", "-c", command], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        #         stdout, stderr = process.communicate()
-        #         print(f"Submit jobs after model training is finished - Stdout:\n{stdout.decode()}")
-        #         print(f"Submit jobs after model training is finished - Stderr:\n{stderr.decode()}")
-        #         print(f"Submit jobs after model training is finished - process return code: {process.returncode}")
 
         if args.push_to_hub:
             push_folder_to_hub(

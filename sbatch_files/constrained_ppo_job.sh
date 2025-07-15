@@ -3,9 +3,9 @@
 #SBATCH --account=PAS2138
 #SBATCH --output=./logs/train/ppo/open_instruct-%j.log
 #SBATCH --error=./logs/train/ppo/open-instruct-%j.err
-#SBATCH --job-name=lagrangian_ppo_meteorintent
+#SBATCH --job-name=lagrangian_print
 #SBATCH --mail-type=END
-#SBATCH --clusters=ascend
+#SBATCH --clusters=cardinal
 
 
 #SBATCH --nodes=1
@@ -27,21 +27,15 @@ export PYTHONPATH=$PYTHONPATH:/fs/scratch/PAS2138/roozbehn99/open-instruct/open_
 # RM2="models/rm/rm_tulu_7b"
 # RM3="models/rm/rm_tulu_7b"
 
-MODEL_NAME="output/llama3_1b_finetuned"
 MODEL_NAME="gpt2"
-
 MAIN_RM="models/rm/rm_llama3_1b_ultrafb"
 
-CONSTRAINT_RM1="./models/rm/safety_rm"
-CONSTRAINT_RM2="./models/rm/helpful_rm"
 
-
-value_model="models/rm/rm_llama3_1b_ultrafb"
+value_model="gpt2"
 
 weights="1"
 
 reward_model="$MAIN_RM"
-constraint_reward_models="$CONSTRAINT_RM1,$CONSTRAINT_RM2"
 constraint_reward_models="meteor,intent"
 
 VERSION=v1
@@ -68,7 +62,7 @@ srun --mpi=pmi2 --nodes=1 --ntasks-per-node=4 \
     --max_prompt_token_lenth 128 \
     --learning_rate 1e-6 \
     --output_dir output/ppo/${MODEL_NAME}__${reward_model}_constrained_${VERSION} \
-    --chat_template tulu \
+    --chat_template simple_concat_with_space \
     --per_device_train_batch_size 4 \
     --per_device_eval_batch_size 1 \
     --gradient_accumulation_steps 32 \
@@ -87,7 +81,7 @@ srun --mpi=pmi2 --nodes=1 --ntasks-per-node=4 \
     --vllm_device cuda:3 \
     --num_evals 3 \
     --response_length 512 \
-    --checkpoint_output_dir output/ppo_checkpoint \
+    --checkpoint_output_dir output/ppo_checkpoint_dummyyy \
     --gradient_checkpointing \
     --with_tracking \
 
