@@ -1028,6 +1028,7 @@ class DatasetConfig:
     def __post_init__(self):
         # if the file exists locally, use the local file
         if os.path.exists(self.dataset_name) and self.dataset_name.endswith(".jsonl"):
+            print(f"Using local jsonl file: {self.dataset_name}")
             assert self.dataset_split == "train", "Only train split is supported for local jsonl files."
             self.dataset = load_dataset(
                 "json",

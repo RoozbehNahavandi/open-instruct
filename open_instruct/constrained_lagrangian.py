@@ -114,6 +114,20 @@ class Args:
     warm_up_steps: int = 0
     """Number of warm up steps for the scheduler"""
 
+    lagrange_init_values: Optional[List[float]] = None
+    """Initial values of Lagrange multipliers, one per constraint RM (excluding the main RM or KL)"""
+
+    lagrange_lr: float = 0.01
+    """Learning rate for updating Lagrange multipliers"""
+
+    lagrange_max: float = 10.0
+    """Maximum value for each Lagrange multiplier (to prevent explosion)"""
+
+    lagrange_min: float = 0.0
+    """Minimum value for each Lagrange multiplier (to prevent negative weights)"""
+    primary_reward_model_index: Optional[int] = 0
+    """Index of the main reward model (used directly as PPO reward); others are treated as constraints"""
+
     # various batch sizes
     num_train_epochs: int = 1
     """Number of epochs to train"""
@@ -364,6 +378,44 @@ def send_queries(accelerator, unwrapped_model, tokenizer, param_prompt_Q, querie
         param_prompt_Q.put((unwrapped_model, g_queries_list))
 
 
+# Map local_metrics indices → names (optional, but makes the code cleaner)
+LOCAL_METRIC_NAMES = [
+    "val/sequence_length_mean",
+    "val/stop_token_rate",
+    "objective/kl1",
+    "objective/neg_logprob_sum",
+    "objective/non_score_reward_mean",
+    "objective/rlhf_reward_mean",
+    "objective/lagrangian_scores_mean",
+    "policy/approxkl_avg",
+    "policy/clipfrac_avg",
+    "loss/policy_avg",
+    "loss/value_avg",
+    "val/value_clipfrac_avg",
+    "policy/entropy_avg",
+    "val/ratio_mean",
+    "val/ratio_var",
+    "objective/kl2",
+    "objective/kl3",
+]
+
+class LagrangeMultipliers:
+    def __init__(self, num_constraints: int, init_vals: List[float], lr: float, min_val: float = 0.0, max_val: float = 10.0):
+        self.lambdas = torch.tensor(init_vals, dtype=torch.float32)
+        self.lr = lr
+        self.min_val = min_val
+        self.max_val = max_val
+
+    def update(self, constraint_vals: List[float]):
+        # Gradient ascent step
+        with torch.no_grad():
+            for i, val in enumerate(constraint_vals):
+                self.lambdas[i] += self.lr * val
+                self.lambdas[i] = torch.clamp(self.lambdas[i], self.min_val, self.max_val)
+
+    def get(self) -> torch.Tensor:
+        return self.lambdas
+    
 # taken from https://github.com/OpenLMLab/MOSS-RLHF/blob/40b91eb2f2b71b16919addede0341d2bef70825d/ppo/ppo_trainer.py#L29
 # we did this we can do a single `model = accelerator.prepare(model)`
 class PolicyAndValueWrapper(torch.nn.Module):
@@ -598,6 +650,25 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
                 f"Policy: {policy.config.vocab_size}, Reward: {rm.config.vocab_size}."
             )
 
+    if args.primary_reward_model_index is not None:
+        rm_names = list(reward_models.keys())
+        primary_rm_name = rm_names[args.primary_reward_model_index]
+        constraint_rm_names = [n for i, n in enumerate(rm_names) if i != args.primary_reward_model_index]
+    else:
+        primary_rm_name = None
+        constraint_rm_names = list(reward_models.keys())  # all RMs are constraints
+
+    lagrange = LagrangeMultipliers(
+        num_constraints=len(constraint_rm_names),
+        init_vals=args.lagrange_init_values or [0.0] * len(constraint_rm_names),
+        lr=args.lagrange_lr,
+        min_val=args.lagrange_min,
+        max_val=args.lagrange_max,
+    )
+
+    print(f"🎯 Primary RM: {primary_rm_name or 'KL'}")
+    print(f"⛓️ Constraint RMs: {constraint_rm_names}")
+
     model = PolicyAndValueWrapper(policy, value_model)
     if model_config.gradient_checkpointing:
         model.gradient_checkpointing_enable()
@@ -756,14 +827,29 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
     data = next(iter_dataloader)
     queries_next = data[INPUT_IDS_PROMPT_KEY].to(device)
 
-    primary_reward_name = "helpfulness"
-    constraint_names = [name for name in reward_models if name != primary_reward_name]
-    lambdas = {name: torch.tensor(1.0, requires_grad=True, device=device) for name in constraint_names}
-    lambda_optimizer = torch.optim.Adam(lambdas.values(), lr=0.01)  # can be tuned
+    # primary_reward_name = "helpfulness"
+    # constraint_names = [name for name in reward_models if name != primary_reward_name]
+    # lambdas = {name: torch.tensor(1.0, requires_grad=True, device=device) for name in constraint_names}
+    # lambda_optimizer = torch.optim.Adam(lambdas.values(), lr=0.01)  # can be tuned
+    # constraint_thresholds = {
+    #     "safety": 0.6,       # you choose based on RM scale
+    #     "factuality": 0.7,
+    # }
+
     constraint_thresholds = {
-        "safety": 0.6,       # you choose based on RM scale
+        "safety": 0.6,
         "factuality": 0.7,
+        # …and any other constraint RMs you load
     }
+
+    lagrange = LagrangeMultipliers(
+        num_constraints=len(constraint_rm_names),
+        init_vals=args.lagrange_init_values or [0.0] * len(constraint_rm_names),
+        lr=args.lagrange_lr,
+        min_val=args.lagrange_min,
+        max_val=args.lagrange_max,
+    )
+
     send_queries(accelerator, None, tokenizer, param_prompt_Q, queries_next)
 
     for _ in range(1, resume_training_step):  # we didn't store scheduler state
@@ -905,21 +991,35 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
                     for name, rm in reward_models.items():
                         _, score, _ = get_reward(rm, postprocessed_query_response, tokenizer.pad_token_id, context_length)
                         reward_outputs[name] = score  # shape: [batch]
-                    primary_scores = reward_outputs[primary_reward_name]
-                    lagrangian_reward = primary_scores.clone()
-                    constraint_scores = {k: reward_outputs[k] for k in constraint_names}
+                        
+                    # 1) stack constraint RM scores in the right order
+                    constraint_vals = torch.stack(
+                        [reward_outputs[n] for n in constraint_rm_names], dim=-1
+                    )  # shape: [batch, num_constraints]
 
-                    for name in constraint_names:
-                        violation = constraint_thresholds[name] - constraint_scores[name]
-                        penalty = lambdas[name] * violation
-                        lagrangian_reward -= penalty
-                    unwrapped_value_model = accelerator.unwrap_model(model).value_model
-                    full_value, _, _ = get_reward(
-                        unwrapped_value_model, query_response, tokenizer.pad_token_id, context_length
-                    )
-                    lagrangian_reward = primary_scores.clone()
-                    scores = lagrangian_reward  # replaces the usual reward_model score
+                    # 2) build a threshold tensor
+                    thresholds = torch.tensor(
+                        [constraint_thresholds[n] for n in constraint_rm_names],
+                        device=constraint_vals.device
+                    ).unsqueeze(0)  # shape: [1, num_constraints]
 
+                    # 3) compute only the *positive* violations
+                    violations = torch.clamp_min(constraint_vals - thresholds, 0.0)  # ReLU
+
+                    # 4) total penalty = λᵢ·violationᵢ summed over constraints
+                    lam = lagrange.get().to(violations.device)        # shape: [num_constraints]
+                    penalty = (lam * violations).sum(dim=-1)          # shape: [batch]
+
+                    # 5) main reward: either your chosen RM or KL fallback
+                    if primary_rm_name is not None:
+                        main_reward = reward_outputs[primary_rm_name]
+                    else:
+                        # average KL over the generated tokens
+                        main_reward = (ref_logprob - logprob).sum(dim=-1) / sequence_length
+
+                    # 6) final Lagrangian‐constrained reward
+                    lagrangian_reward = main_reward - penalty
+                    scores = lagrangian_reward
                     # print(f'score: {score} {score.shape}, full_value: {full_value} {full_value.shape}')
                     # print('--------------')
                     value = full_value[:, context_length - 1 : -1].squeeze(-1)
@@ -1075,19 +1175,10 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
                             ratio_stats[epoch_idx, minibatch_idx, gradient_accumulation_idx] = ratio.mean()
 
                         if training_step % args.lagrange_update_interval == 0:
-                            lambda_optimizer.zero_grad()
+                            # mean violation per constraint across the batch
+                            mean_violations = violations.mean(dim=0).tolist()
+                            lagrange.update(mean_violations)
 
-                            constraint_loss = 0
-                            for name in constraint_names:
-                                # We detach to stop gradient from flowing into RM outputs
-                                constraint_violation = constraint_thresholds[name] - constraint_scores[name].detach()
-                                constraint_loss -= (lambdas[name] * constraint_violation).mean()
-
-                            constraint_loss.backward()
-                            lambda_optimizer.step()
-
-                            for name in lambdas:
-                                lambdas[name].data.clamp_(min=0.0)
                     gradient_accumulation_idx += 1
                 minibatch_idx += 1
                 # fmt: off
@@ -1120,10 +1211,10 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
                     local_metrics[15] = ((kl) ** 2 / 2).sum(1).mean()  # second-order KL approx
                     local_metrics[16] = ((-kl).exp() - 1 + kl).sum(1).mean()  # reverse KL approx
 
-                    # Reduce across devices
+
                     global_metrics = accelerator.reduce(local_metrics, reduction="mean").tolist()
 
-                    # Base PPO + RLHF metrics
+                    # Base metrics from local_metrics
                     metrics = {
                         "episode": episode,
                         "training_step": training_step,
@@ -1131,37 +1222,40 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
                         "epoch": episode / len(train_dataset),
                         "time/from_scratch": time.time() - start_time,
                         "time/training": time.time() - training_time_start,
-                        "val/sequence_lengths": global_metrics[0],
-                        "val/num_stop_token_ids": global_metrics[1],
-                        "objective/kl": global_metrics[2],
-                        "objective/kl2": global_metrics[15],
-                        "objective/kl3": global_metrics[16],
-                        "objective/entropy": global_metrics[3],
-                        "objective/non_score_reward": global_metrics[4],
-                        "objective/rlhf_reward": global_metrics[5],
-                        "objective/scores": global_metrics[6],
-                        "policy/approxkl_avg": global_metrics[7],
-                        "policy/clipfrac_avg": global_metrics[8],
-                        "loss/policy_avg": global_metrics[9],
-                        "loss/value_avg": global_metrics[10],
-                        "val/clipfrac_avg": global_metrics[11],
-                        "policy/entropy_avg": global_metrics[12],
-                        "val/ratio": global_metrics[13],
-                        "val/ratio_var": global_metrics[14],
                     }
+                    metrics.update({ name: global_metrics[i] for i, name in enumerate(LOCAL_METRIC_NAMES) })
 
-                    # Constraint-related metrics
-                    for i, constraint_score in enumerate(constraint_scores):
-                        metrics[f"constraint/reward/{i}"] = constraint_score.mean().detach().item()
+                    # Log main reward, penalty, and detailed constraint info
+                    with torch.no_grad():
+                        # main_reward, penalty, violations, constraint_vals are still in scope
+                        metrics["objective/main_reward_mean"] = main_reward.mean().item()
+                        metrics["objective/penalty_mean"]     = penalty.mean().item()
+                        
+                        lam_tensor = lagrange.get().to(device)  # [num_constraints]
+                        for i, rm_name in enumerate(constraint_rm_names):
+                            # mean RM score
+                            rm_mean = constraint_vals[:, i].mean().item()
+                            # threshold
+                            thr = constraint_thresholds[rm_name]
+                            # violation rate = fraction of batch where RM > threshold
+                            v_rate = (violations[:, i] > 0.0).float().mean().item()
+                            # λ value
+                            lam_val = lam_tensor[i].item()
+                            
+                            metrics[f"constraint/{rm_name}/mean"]         = rm_mean
+                            metrics[f"constraint/{rm_name}/threshold"]    = thr
+                            metrics[f"constraint/{rm_name}/violation_rate"] = v_rate
+                            metrics[f"constraint/{rm_name}/lambda"]       = lam_val
 
-                    for i, lam in enumerate(lambdas):
-                        metrics[f"constraint/lambda/{i}"] = lam.detach().item()
+                    # Log the PPO losses you already compute
+                    metrics["loss/policy_total"] = pg_loss_stats.mean().item()
+                    metrics["loss/value_total"]  = vf_loss_stats.mean().item()
 
-                    for i, (score, threshold) in enumerate(zip(constraint_scores, constraint_thresholds)):
-                        violation = (score > threshold).float().mean()
-                        metrics[f"constraint/violation/{i}"] = violation.detach().item()
-
-                    metrics["loss/constraint"] = constraint_loss.detach().item()
+                    # Finally print & write
+                    if accelerator.is_main_process:
+                        print_rich_single_line_metrics(metrics)
+                        for key, val in metrics.items():
+                            writer.add_scalar(key, val, episode)
                     
             if accelerator.is_main_process:
                 print_rich_single_line_metrics(metrics)

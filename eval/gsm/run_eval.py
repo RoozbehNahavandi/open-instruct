@@ -100,11 +100,13 @@ def main(args):
                 max_tokens=512,
                 stop=stop_strings
             )
+            
             if args.use_chat_format:
                 prompts = [apply_chat_format(example, tokenizer) for example in test_data]
             else:
                 prompts = [prompt_prefix + "Question: " + example["question"].strip() + "\nAnswer:" for example in test_data]
             # We need to remap the outputs to the prompts because vllm might not return outputs for some prompts (e.g., if the prompt is too long)
+            print(f'prompt[0]: "{prompts[0]}"')
             generations = model.generate(prompts, sampling_params)
             prompt_to_output = {
                 g.prompt: g.outputs[0].text for g in generations

@@ -1,6 +1,7 @@
 import gc
 import json
 import os
+import re
 import random
 import shutil
 import signal
@@ -39,6 +40,7 @@ from transformers import (
     get_scheduler,
 )
 from vllm import LLM, SamplingParams
+from eval.templates import create_prompt_with_tulu_chat_format
 
 from open_instruct.dataset_processor import (
     CHAT_TEMPLATES,
@@ -48,6 +50,23 @@ from open_instruct.dataset_processor import (
     SimpleGenerateCollator,
     visualize_token,
 )
+
+import evaluate
+exact_match = evaluate.load("exact_match")
+
+
+from eval.gsm.examplars import EXAMPLARS as GSM_EXAMPLARS
+
+from eval.utils import (
+    generate_completions,
+    load_hf_lm,
+    query_openai_chat_model,
+    dynamic_import_function,
+    load_hf_tokenizer,
+    upload_results_to_hf,
+    check_and_upload_model_metadata
+)
+
 from open_instruct.model_utils import (
     ModelConfig,
     disable_dropout_in_model,
@@ -238,7 +257,16 @@ class Args:
     """The name or path of the evaluation reward model"""
     ifeval: bool = True
     """if to use IF eval"""
-    ifeval_eval_freq: int = 2
+    gsmeval: bool = True
+    """if to use GSM eval"""
+    gsm_n_shot: int = 8
+    """The number of examples to use for GSM eval"""
+    gsm_no_cot: bool = True
+    """If True, do not use COT for GSM eval"""
+    eval_freq: int = 2
+    """The frequency of evaluation steps for IF and GSM eval"""
+    gsm_max_num_examples: int = 200
+    """The maximum number of examples to use for GSM eval"""
 
     # wandb and HF tracking configs
     with_tracking: bool = False
@@ -342,9 +370,12 @@ def vllm_generate(
     param_prompt_Q: Queue,
     num_training_steps: int,
     sample_evaluation_prompt_token_ids: Optional[List[int]],
-    evaluation_Q: Queue,
+    ifeval_Q: Queue,
+    gsm_Q: Queue,
     eval_freq: int,
     resume_training_step: int,
+    ifeval_prompts = None,
+    gsm_prompts = None,
     tokenizer: AutoTokenizer = None,
 ):
     vllm_single_gpu_patch()
@@ -371,39 +402,46 @@ def vllm_generate(
                 f"🔥🔥🔥 Loading weights using shared memory; Time to load weights: {time.time() - start_time:.2f} seconds"
             )
         generation_start_time = time.time()
-        # print(f'decoded prompt in vllm_generate: {tokenizer.batch_decode(g_queries_list, skip_special_tokens=False)}')
         outputs = llm.generate(prompt_token_ids=g_queries_list, sampling_params=generation_config)
         response_ids = [list(output.outputs[0].token_ids) for output in outputs]
-        # print(f'decoded output in vllm_generate: {tokenizer.batch_decode(response_ids, skip_special_tokens=False)}')
         print(f"🔥🔥🔥 Generation time: {time.time() - generation_start_time:.2f} seconds")
         response_ids_Q.put(response_ids)
-        print(f'before eval - training step: {training_step}, {(training_step - 1) % eval_freq}')
-        if sample_evaluation_prompt_token_ids is not None and (training_step - 1) % eval_freq == 0:
-            print(f'🔥🔥🔥 Running evaluation at step {training_step}')
-            prompt_token_ids = sample_evaluation_prompt_token_ids.tolist()
-
-
+        if ifeval_prompts is not None and (training_step - 1) % eval_freq == 0:
+            print(f'🔥🔥🔥 Running IF eval at step {training_step}')
             eval_config = SamplingParams(
                 temperature=0.0,
                 top_p=1.0,
                 max_tokens=2048,
                 include_stop_str_in_output=True,
             )
-            eval_outputs = llm.generate(
-                prompt_token_ids=prompt_token_ids,
+            ifeval_generations = llm.generate(
+                ifeval_prompts,
                 sampling_params=eval_config
             )
-            # 🔍 Print first prompt and response for debugging
-            first_prompt_ids = prompt_token_ids[:1]
-            first_prompt = tokenizer.decode(first_prompt_ids[0], skip_special_tokens=False)
-            first_output_ids = eval_outputs[0].outputs[0].token_ids
-            first_output = tokenizer.decode(first_output_ids, skip_special_tokens=False)
+            prompt_to_output = {
+                g.prompt: g.outputs[0].text for g in ifeval_generations
+            }
+            ifeval_outputs = [prompt_to_output[prompt] if prompt in prompt_to_output else "" for prompt in ifeval_prompts]
+            ifeval_Q.put(ifeval_outputs)
 
-            print("🧪 [PPO] First eval prompt:\n", first_prompt)
-            print("🧪 [PPO] First eval output:\n", first_output)
-            
-            response_ids = [list(output.outputs[0].token_ids) for output in eval_outputs]
-            evaluation_Q.put(response_ids)
+        if gsm_prompts is not None and (training_step - 1) % eval_freq == 0:
+            print(f'🔥🔥🔥 Running GSM eval at step {training_step}')
+            stop_strings = ["\n\n"] if False else ["\n"]
+
+            gsm_config = SamplingParams(
+                temperature=0.0,
+                max_tokens=512,
+                stop=stop_strings
+            )
+            gsm_generations = llm.generate(
+                gsm_prompts,
+                sampling_params=gsm_config
+            )
+            prompt_to_output = {
+                g.prompt: g.outputs[0].text for g in gsm_generations
+            }
+            gsm_outputs = [prompt_to_output[prompt] if prompt in prompt_to_output else "" for prompt in gsm_prompts]
+            gsm_Q.put(gsm_outputs)
 
 def send_queries(accelerator, unwrapped_model, tokenizer, param_prompt_Q, queries):
     g_queries_list = gather_object(queries.tolist())
@@ -617,7 +655,7 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
     # create a tokenizer (pad from right)
     config = AutoConfig.from_pretrained(model_config.model_name_or_path, revision=model_config.model_revision)
     tokenizer = AutoTokenizer.from_pretrained(
-        model_config.model_name_or_path, revision=model_config.model_revision, padding_side="right"
+        model_config.model_name_or_path, revision=model_config.model_revision, padding_side="left"
     )
     if config.architectures == "LlamaForCausalLM" and config.bos_token_id == 128000:
         tokenizer.pad_token_id = 128002  # <|reserved_special_token_0|>
@@ -835,33 +873,87 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
     )
     param_prompt_Q = None
     response_ids_Q = None
-    evaluation_Q = None
+    ifeval_Q = None
+    gsm_Q = None
+
     if accelerator.is_main_process:
         response_ids_Q = Queue(maxsize=1)
         param_prompt_Q = Queue(maxsize=1)
-        evaluation_Q = Queue(maxsize=1)
+        ifeval_Q = Queue(maxsize=1)
+        gsm_Q = Queue(maxsize=1)
         LOCAL_NUM_EVAL_SAMPLES = 4
         num_eval_samples = LOCAL_NUM_EVAL_SAMPLES * accelerator.num_processes
         sample_evaluation_prompt_token_ids = None
+        ifeval_prompts = None
+        gsm_prompts = None
         # if eval_dataset is not None:
         #     sample_evaluation_prompt_token_ids = eval_dataset[:num_eval_samples][INPUT_IDS_PROMPT_KEY]
         if args.ifeval:
             ifeval_inputs = read_prompt_list("data/eval/ifeval/input_data.jsonl")
-            print("🔍 Number of ifeval prompts:", len(ifeval_inputs))
-            print("📌 First raw prompt:")
-            print(ifeval_inputs[0].prompt)
+            ifeval_prompts = []
+            chat_formatting_function = create_prompt_with_tulu_chat_format
+            for inp in ifeval_inputs:
+                ifeval_prompts.append(
+                    chat_formatting_function(
+                        [{"role": "user", "content": inp.prompt}], tokenizer, add_bos=False
+                    )
+                )
+        if args.gsmeval:
+            print("Loading data...")
+            test_data = []
+            with open(os.path.join("data/eval/gsm/", f"test.jsonl")) as fin:
+                for line in fin:
+                    example = json.loads(line)
+                    test_data.append({
+                        "question": example["question"],
+                        "answer": example["answer"].split("####")[1].strip()
+                    })
+                
+            # some numbers are in the `x,xxx` format, and we want to remove the comma
+            for example in test_data:
+                example["answer"] = re.sub(r"(\d),(\d)", r"\1\2", example["answer"])
+                assert float(example["answer"]), f"answer is not a valid number: {example['answer']}"
 
-            # sample_evaluation_prompt_token_ids = eval_dataset[:num_eval_samples][INPUT_IDS_PROMPT_KEY]
-            sample_evaluation_prompt_token_ids = tokenizer(
-                [inp.prompt for inp in ifeval_inputs], return_tensors="pt", padding=True, truncation=True
-            )["input_ids"]
-            # Print tokenized version of first prompt
-            print("🧩 First prompt token IDs:")
-            print(sample_evaluation_prompt_token_ids[0].tolist())
+            if args.gsm_max_num_examples and len(test_data) > args.gsm_max_num_examples:
+                test_data = random.sample(test_data, args.gsm_max_num_examples)
+                
 
-            # Decode to double check
-            print("🔁 First prompt decoded back:")
-            print(tokenizer.decode(sample_evaluation_prompt_token_ids[0], skip_special_tokens=True))
+            global GSM_EXAMPLARS
+            if args.gsm_n_shot:
+                if len(GSM_EXAMPLARS) > args.gsm_n_shot:
+                    GSM_EXAMPLARS = random.sample(GSM_EXAMPLARS, args.gsm_n_shot)
+                demonstrations = []
+                for example in GSM_EXAMPLARS:
+                    if args.gsm_no_cot:
+                        demonstrations.append(
+                            "Quesion: " + example["question"] + "\n" + "Answer: " + example["short_answer"]
+                        )
+                    else:
+                        demonstrations.append(
+                            "Question: " + example["question"] + "\n" + "Answer: " + example["cot_answer"]
+                        )
+                prompt_prefix = "Answer the following questions.\n\n" + "\n\n".join(demonstrations) + "\n\n"
+            else:
+                prompt_prefix = "Answer the following question.\n\n"
+
+            use_chat_format = False
+            chat_formatting_function = 'eval.templates.create_prompt_with_tulu_chat_format'
+            if use_chat_format:
+                chat_formatting_function = dynamic_import_function(args.chat_formatting_function)
+                def apply_chat_format(example, tokenizer):
+                    messages = [{"role": "user", "content": prompt_prefix + "Question: " + example["question"].strip()}]
+                    prompt = chat_formatting_function(messages, tokenizer, add_bos=False)
+                    prompt += "Answer:" if prompt[-1] in ["\n", " "] else " Answer:"
+                    return prompt
+
+            if use_chat_format:
+                gsm_prompts = [apply_chat_format(example, tokenizer) for example in test_data]
+            else:
+                gsm_prompts = [prompt_prefix + "Question: " + example["question"].strip() + "\nAnswer:" for example in test_data]
+           
+            print(f'🔥🔥🔥 GSM prompts loaded, number of prompts: {len(gsm_prompts)}')
+            print(f'🔥🔥🔥 GSM prompts[0]: {gsm_prompts[0]}')
+
         thread = threading.Thread(
             target=vllm_generate,
             args=(
@@ -875,9 +967,12 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
                 param_prompt_Q,
                 args.num_training_steps,
                 sample_evaluation_prompt_token_ids,
-                evaluation_Q,
-                args.ifeval_eval_freq,
+                ifeval_Q,
+                gsm_Q,
+                args.eval_freq,
                 resume_training_step,
+                ifeval_prompts,
+                gsm_prompts,
                 tokenizer
             ),
         )
@@ -919,35 +1014,31 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
             break
 
         if accelerator.is_main_process:
+            # IFEVAL evaluation
             try:
-                evaluation_response_ids = evaluation_Q.get_nowait()
+                ifeval_outputs = ifeval_Q.get_nowait()
             except Empty:
-                print("🙈 No evaluation outputs at this step. Skipping eval.")
+                print("🙈 No IFEVAL evaluation outputs at this step. Skipping ifeval eval.")
             else:
-                # Proceed with decoding and eval only if there's something
-                prompts = tokenizer.batch_decode(sample_evaluation_prompt_token_ids, skip_special_tokens=True)
-                completions = tokenizer.batch_decode(evaluation_response_ids, skip_special_tokens=True)
-                completions = [c.replace(tokenizer.pad_token, "") for c in completions]
-
                 strict_outputs = [
-                    test_instruction_following_strict(inp, completions[i])
+                    test_instruction_following_strict(inp, ifeval_outputs[i])
                     for i, inp in enumerate(ifeval_inputs)
                 ]
                 loose_outputs = [
-                    test_instruction_following_loose(inp, completions[i])
+                    test_instruction_following_loose(inp, ifeval_outputs[i])
                     for i, inp in enumerate(ifeval_inputs)
                 ]
 
                 acc_strict = sum(o.follow_all_instructions for o in strict_outputs) / len(strict_outputs)
                 acc_loose = sum(o.follow_all_instructions for o in loose_outputs) / len(loose_outputs)
 
-                print("🔥🔥🔥 Evaluation responses received")
+                print("🔥🔥🔥 IFEVAL responses received")
                 print(f"📊 IFEVAL strict accuracy: {acc_strict:.4f}")
                 print(f"📊 IFEVAL loose  accuracy: {acc_loose:.4f}")
 
                 table = {
-                    "prompt": prompts,
-                    "response": completions,
+                    "prompt": ifeval_prompts,
+                    "response": ifeval_outputs,
                 }
                 df = pd.DataFrame(table)
 
@@ -958,7 +1049,42 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
                 })
                 print_rich_table(df.head(5))
 
-            # Print the keys in the batch
+            # GSM evaluation
+            try:
+                gsm_outputs = gsm_Q.get_nowait()
+            except Empty:
+                print("🙈 No GSM evaluation outputs at this step. Skipping GSM eval.")
+            else:
+                predictions = []
+                for output in gsm_outputs:
+                    # Remove commas from numbers like 1,234
+                    output = re.sub(r"(\d),(\d)", r"\1\2", output)
+                    numbers = re.findall(r"[-+]?\d*\.\d+|\d+", output)
+                    if numbers:
+                        predictions.append(numbers[-1])
+                    else:
+                        predictions.append(output)
+
+                print("🧮 Calculating GSM accuracy...")
+                targets = [example["answer"] for example in test_data]
+
+                em_score = exact_match.compute(
+                    predictions=predictions,
+                    references=targets,
+                    ignore_case=True,
+                    ignore_punctuation=True
+                )["exact_match"]
+
+                print(f"🎯 GSM exact match accuracy: {em_score:.4f}")
+
+                wandb.log({"gsm/exact_match": em_score})
+
+                predictions_table = [{
+                    "question": example["question"],
+                    "answer": example["answer"],
+                    "model_output": output,
+                    "prediction": pred
+                } for example, output, pred in zip(test_data, gsm_outputs, predictions)]
 
         with unwrap_model_for_generation(model, accelerator) as unwrapped_model:
             if unwrapped_model is None:

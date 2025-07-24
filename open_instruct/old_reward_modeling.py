@@ -203,7 +203,6 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
 
     accelerator = calculate_runtime_args_and_accelerator(args, model_config)
     # subprocess.run(['nvidia-smi'], shell=True)
-    print('after initializing accelerate.')
 
     local_seed = args.seed + accelerator.process_index
 
@@ -281,6 +280,9 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
             eval_dataset = dataset_processor.filter(eval_dataset)
         dataset_dict["eval"] = eval_dataset
 
+
+    print(f'train_dataset: {len(train_dataset)} samples')
+    print(f'train_dataset[0]: {train_dataset[0]}')
     # some more runtime logging
     if args.total_episodes is None:
         args.total_episodes = args.num_train_epochs * len(train_dataset)
@@ -296,6 +298,7 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
             )
             wandb.log({"token_length": wandb.Image(f"runs/{args.run_name}/token_length.png")})
 
+    print("Loading model...")
     # create the model and optimizer
     model: PreTrainedModel = AutoModelForSequenceClassification.from_pretrained(
         model_config.model_name_or_path, revision=model_config.model_revision, num_labels=1
@@ -316,6 +319,8 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
         num_warmup_steps=args.warm_up_steps,
         num_training_steps=args.num_training_steps * args.num_train_epochs,
     )
+    print('model config:', model_config)
+
     data_collator = SimplePreferenceCollator(pad_token_id=tokenizer.pad_token_id)
     dataloader = DataLoader(
         train_dataset,
@@ -356,10 +361,13 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
             episode += args.micro_batch_size
             training_step += 1
             query_responses = torch.cat((data[INPUT_IDS_CHOSEN_KEY], data[INPUT_IDS_REJECTED_KEY]), dim=0)
+            print(f'query_responses: {tokenizer.batch_decode(query_responses, skip_special_tokens=True)}')
             with accelerator.accumulate(model):
                 _, predicted_reward, _ = get_reward(model, query_responses, tokenizer.pad_token_id, 0)
                 chosen_reward = predicted_reward[: data[INPUT_IDS_CHOSEN_KEY].shape[0]]
                 rejected_reward = predicted_reward[data[INPUT_IDS_CHOSEN_KEY].shape[0] :]
+                print(f'chosen_reward: {chosen_reward}')
+                print(f'rejected_reward: {rejected_reward}')
                 accuracy = (chosen_reward > rejected_reward).float().mean()
                 loss = -F.logsigmoid(chosen_reward - rejected_reward).mean()
                 # subprocess.run(['nvidia-smi'], shell=True)

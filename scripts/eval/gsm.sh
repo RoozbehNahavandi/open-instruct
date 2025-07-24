@@ -1,26 +1,26 @@
 # Here we use 1 GPU for demonstration, but you can use multiple GPUs and larger eval_batch_size to speed up the evaluation.
 
 
-echo "Evaluating meta-llama/Llama-2-7b-hf"
+echo "Evaluating output/llama3_1b_finetuned"
 python -m eval.gsm.run_eval \
     --data_dir data/eval/gsm/ \
     --max_num_examples 200 \
     --save_dir results/gsm/llama-7B-cot-8shot \
-    --model meta-llama/Llama-2-7b-hf \
-    --tokenizer meta-llama/Llama-2-7b-hf \
+    --model output/llama3_1b_finetuned \
+    --tokenizer output/llama3_1b_finetuned \
     --n_shot 8 \
     --use_vllm
 
 
-echo "Evaluating Tulu-V2.5-7B_V1"
-python -m eval.gsm.run_eval \
-    --data_dir data/eval/gsm/ \
-    --max_num_examples 200 \
-    --save_dir results/gsm/llama-7B-cot-8shot \
-    --model models/base_ppo/Tulu-V2.5-7B_V1 \
-    --tokenizer models/base_ppo/Tulu-V2.5-7B_V1 \
-    --n_shot 8 \
-    --use_vllm
+# echo "Evaluating Tulu-V2.5-7B_V1"
+# python -m eval.gsm.run_eval \
+#     --data_dir data/eval/gsm/ \
+#     --max_num_examples 200 \
+#     --save_dir results/gsm/llama-7B-cot-8shot \
+#     --model models/base_ppo/Tulu-V2.5-7B_V1 \
+#     --tokenizer models/base_ppo/Tulu-V2.5-7B_V1 \
+#     --n_shot 8 \
+#     --use_vllm
 
 
 # echo "Evaluating allenai/tulu-v2.5-dpo-13b-uf-mean"
@@ -71,7 +71,7 @@ python -m eval.gsm.run_eval \
 
 # # Evaluating llama2 chat model using chain-of-thought and chat format
 # python -m eval.gsm.run_eval \
-#     --data_dir data/eval/gsm/ \
+#     --data_dir data/eval/gsm \
 #     --max_num_examples 200 \
 #     --save_dir results/gsm/llama2-chat-7B-cot-8shot \
 #     --model ../hf_llama2_models/7B-chat \

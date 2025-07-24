@@ -269,16 +269,6 @@ def main(args):
         else:
             prompts = [inp.prompt for inp in inputs]
 
-        print(f"📤 Number of prompts passed to generation: {len(prompts)}")
-        print("📤 First prompt before generation:")
-        print(prompts[0])
-
-        # Tokenize manually to check input IDs
-        input_ids = tokenizer(prompts, return_tensors="pt", padding=True, truncation=True)["input_ids"]
-        print("🔢 Token IDs of first prompt:")
-        print(input_ids[0].tolist())
-        print("🔁 Decoded first prompt again:")
-        print(tokenizer.decode(input_ids[0], skip_special_tokens=True))
         # generate with vllm
         if args.use_vllm:
             sampling_params = vllm.SamplingParams(
@@ -303,10 +293,7 @@ def main(args):
                 batch_size=args.eval_batch_size if args.eval_batch_size else 1,
                 stop_id_sequences=[tokenizer.convert_tokens_to_ids(stop) for stop in args.additional_stop_sequence],
             )
-        print("🧪 [IFEVAL] First prompt:")
-        print(prompts[0])
-        print("🧪 [IFEVAL] First output:")
-        print(outputs[0])
+
     else:
         instances = []
         for i, inp in enumerate(inputs):
@@ -321,7 +308,6 @@ def main(args):
             output_path=os.path.join(args.save_dir, f"openai_prediction_cache.jsonl"),
         )
         outputs = [result["output"] for result in results]
-
     assert len(inputs) == len(outputs), "Number of inputs and outputs are not the same."
     response_dict = {inp.prompt: output for inp, output in zip(inputs, outputs)}
 
