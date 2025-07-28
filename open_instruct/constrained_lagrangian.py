@@ -39,6 +39,14 @@ from transformers import (
 )
 from vllm import LLM, SamplingParams
 
+from open_instruct.dataset_transformation import (
+    DATASET_SOURCE_KEY,
+    GROUND_TRUTHS_KEY,
+    INPUT_IDS_PROMPT_KEY,
+    TokenizerConfig,
+    get_cached_dataset_tulu,
+    visualize_token,
+)
 from open_instruct.dataset_processor import (
     CHAT_TEMPLATES,
     INPUT_IDS_PROMPT_KEY,
@@ -175,8 +183,10 @@ class Args:
     """List of HuggingFace paths for reward models (e.g., helpfulness, safety, etc.)"""
     reward_model_revisions: Optional[List[Optional[str]]] = None
     """Optional list of git revisions for each reward model"""
-    reward_model_names: Optional[List[str]] = None
+    reward_model_names: List[str] = None
     """Optional list of names to assign to reward models, matching the path order"""
+    constraint_thresholds: List[float] = field(default_factory=list)
+    """Threshold for each constraint RM, in the same order as they appear (after removing the primary)."""
     lagrange_update_interval: int = 5
     """The number of steps to update the Lagrange multipliers"""
     # generation config
@@ -530,23 +540,40 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
         tokenizer.add_special_tokens({"pad_token": "[PAD]"})  # NOTE: we do not resize the embedding
     tokenizer.chat_template = CHAT_TEMPLATES[dataset_config.chat_template]
 
+
+
     # create the dataset
     dataset_dict = DatasetDict()
     dataset_processor = SFTDatasetProcessor(tokenizer=tokenizer, config=dataset_config)
     train_dataset = combine_dataset(
         args.dataset_mixer_dict,
         splits=args.dataset_train_splits,
-        columns_to_keep=['chosen'],
+        columns_to_keep=[dataset_config.sft_prompt_key, dataset_config.preference_chosen_key, dataset_config.preference_rejected_key],
     )
-    train_dataset = train_dataset.map(
-        lambda row: {"prompt": row["chosen"][-2]["content"] if row["chosen"][-2]["role"] == "user" else ""},
-        desc="Extracting prompt from last user message"
-    )
-    train_dataset = train_dataset.remove_columns(["chosen"])
-    # print len of train_dataset
-    # print("🔥🔥🔥 Train dataset length:", len(train_dataset))
-    # print first sample of train_dataset train_dataset[0]
-    print(f'11 train_dataset[0]: {train_dataset[0]}')  
+    if dataset_config.sanity_check:
+        train_dataset = train_dataset.select(
+            range(0, min(len(train_dataset), dataset_config.sanity_check_max_samples))
+        )
+    with accelerator.main_process_first():
+        train_dataset = dataset_processor.tokenize(train_dataset)
+        train_dataset = dataset_processor.filter(train_dataset)
+    dataset_dict["train"] = train_dataset
+    # # create the dataset
+    # dataset_dict = DatasetDict()
+    # dataset_processor = SFTDatasetProcessor(tokenizer=tokenizer, config=dataset_config)
+    # train_dataset = combine_dataset(
+    #     args.dataset_mixer_dict,
+    #     splits=args.dataset_train_splits,
+    #     columns_to_keep=['chosen'],
+    # )
+    # train_dataset = train_dataset.map(
+    #     lambda row: {"prompt": row["chosen"][-2]["content"] if row["chosen"][-2]["role"] == "user" else ""},
+    #     desc="Extracting prompt from last user message"
+    # )
+    # # print len of train_dataset
+    # # print("🔥🔥🔥 Train dataset length:", len(train_dataset))
+    # # print first sample of train_dataset train_dataset[0]
+    # print(f'train_dataset[0]: {train_dataset[0]}')  
  
 
     if dataset_config.sanity_check:
@@ -555,16 +582,7 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
         )
     with accelerator.main_process_first():
         train_dataset = dataset_processor.tokenize(train_dataset)
-        # print(f'ananan train dataset[1]: {train_dataset[1]}')  # print second sample of train_dataset
         train_dataset = dataset_processor.filter(train_dataset)
-        # print(f'ananan train dataset[2]: {train_dataset[2]}')  # print third sample of train_dataset
-
-    # # Print a single sample to verify tokenization + chat template
-    # sample = train_dataset[0]
-    # print("\n🧾 Raw prompt string:", sample["prompt"])
-    # print("🧱 input_ids_prompt:", sample[INPUT_IDS_PROMPT_KEY])
-    # print("🧾 Decoded prompt (no skip):", tokenizer.decode(sample[INPUT_IDS_PROMPT_KEY], skip_special_tokens=False))
-    # print("🧾 Decoded prompt (skip specials):", tokenizer.decode(sample[INPUT_IDS_PROMPT_KEY], skip_special_tokens=True))
 
     dataset_dict["train"] = train_dataset
     eval_dataset = None
@@ -584,6 +602,9 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
             eval_dataset = dataset_processor.tokenize(eval_dataset)
             eval_dataset = dataset_processor.filter(eval_dataset)
         dataset_dict["eval"] = eval_dataset
+
+    print(f'train_dataset: {len(train_dataset)} samples')
+    print(f'eval_dataset: {len(eval_dataset) if eval_dataset is not None else 0} samples')
 
     # some more runtime logging
     if accelerator.is_main_process:
@@ -612,8 +633,8 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
         use_cache=False,
     )
     value_model: PreTrainedModel = AutoModelForSequenceClassification.from_pretrained(
-        args.reward_model_path,
-        revision=args.reward_model_revision,
+        args.reward_model_paths[1],
+        revision=args.reward_model_revisions if args.reward_model_revisions else None,
         num_labels=1,
         torch_dtype=torch.float16,
         attn_implementation="flash_attention_2",
@@ -623,6 +644,9 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
     reward_models: dict[str, PreTrainedModel] = {}
 
     for i, path in enumerate(args.reward_model_paths):
+        # treat both "None" and "KL" as your KL‐fallback slot
+        if path.lower() in ('none', 'kl'):
+            continue
         name = (
             args.reward_model_names[i]
             if args.reward_model_names and i < len(args.reward_model_names)
@@ -643,20 +667,26 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
         )
         reward_models[name] = rm
 
-    for name, rm in reward_models.items():
-        if policy.config.vocab_size != rm.config.vocab_size:
-            raise ValueError(
-                f"Policy and reward model '{name}' must have the same vocab size. "
-                f"Policy: {policy.config.vocab_size}, Reward: {rm.config.vocab_size}."
-            )
+    # for name, rm in reward_models.items():
+    #     if policy.config.vocab_size != rm.config.vocab_size:
+    #         raise ValueError(
+    #             f"Policy and reward model '{name}' must have the same vocab size. "
+    #             f"Policy: {policy.config.vocab_size}, Reward: {rm.config.vocab_size}."
+    #         )
 
-    if args.primary_reward_model_index is not None:
+    if args.reward_model_paths[0].lower() not in ('none', 'kl'):
         rm_names = list(reward_models.keys())
-        primary_rm_name = rm_names[args.primary_reward_model_index]
-        constraint_rm_names = [n for i, n in enumerate(rm_names) if i != args.primary_reward_model_index]
+        primary_rm_name = rm_names[0]
+        constraint_rm_names = [n for i, n in enumerate(rm_names) if i != 0]
     else:
-        primary_rm_name = None
+        primary_rm_name = "kl"
         constraint_rm_names = list(reward_models.keys())  # all RMs are constraints
+
+    # sanity-check that you passed exactly one threshold per constraint RM
+    assert len(args.constraint_thresholds) == len(constraint_rm_names), (
+        f"Expected {len(constraint_rm_names)} thresholds but got "
+        f"{len(args.constraint_thresholds)}"
+    )
 
     lagrange = LagrangeMultipliers(
         num_constraints=len(constraint_rm_names),
@@ -666,8 +696,8 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
         max_val=args.lagrange_max,
     )
 
-    print(f"🎯 Primary RM: {primary_rm_name or 'KL'}")
-    print(f"⛓️ Constraint RMs: {constraint_rm_names}")
+    print(f"Primary RM: {primary_rm_name}")
+    print(f"Constraint RMs: {constraint_rm_names}")
 
     model = PolicyAndValueWrapper(policy, value_model)
     if model_config.gradient_checkpointing:
@@ -704,6 +734,7 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
     torch.manual_seed(args.seed)
     model, optimizer, dataloader = accelerator.prepare(model, optimizer, dataloader)
     torch.manual_seed(local_seed)
+
 
     # resume from preemption
     resume_training_step = 1
@@ -836,19 +867,15 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
     #     "factuality": 0.7,
     # }
 
-    constraint_thresholds = {
-        "safety": 0.6,
-        "factuality": 0.7,
-        # …and any other constraint RMs you load
-    }
 
-    lagrange = LagrangeMultipliers(
-        num_constraints=len(constraint_rm_names),
-        init_vals=args.lagrange_init_values or [0.0] * len(constraint_rm_names),
-        lr=args.lagrange_lr,
-        min_val=args.lagrange_min,
-        max_val=args.lagrange_max,
-    )
+
+    # lagrange = LagrangeMultipliers(
+    #     num_constraints=len(constraint_rm_names),
+    #     init_vals=args.lagrange_init_values or [0.0] * len(constraint_rm_names),
+    #     lr=args.lagrange_lr,
+    #     min_val=args.lagrange_min,
+    #     max_val=args.lagrange_max,
+    # )
 
     send_queries(accelerator, None, tokenizer, param_prompt_Q, queries_next)
 
@@ -997,11 +1024,10 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
                         [reward_outputs[n] for n in constraint_rm_names], dim=-1
                     )  # shape: [batch, num_constraints]
 
-                    # 2) build a threshold tensor
                     thresholds = torch.tensor(
-                        [constraint_thresholds[n] for n in constraint_rm_names],
+                        args.constraint_thresholds,
                         device=constraint_vals.device
-                    ).unsqueeze(0)  # shape: [1, num_constraints]
+                    ).unsqueeze(0)  # [1, num_constraints]
 
                     # 3) compute only the *positive* violations
                     violations = torch.clamp_min(constraint_vals - thresholds, 0.0)  # ReLU
@@ -1011,7 +1037,7 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
                     penalty = (lam * violations).sum(dim=-1)          # shape: [batch]
 
                     # 5) main reward: either your chosen RM or KL fallback
-                    if primary_rm_name is not None:
+                    if primary_rm_name != 'kl':
                         main_reward = reward_outputs[primary_rm_name]
                     else:
                         # average KL over the generated tokens
