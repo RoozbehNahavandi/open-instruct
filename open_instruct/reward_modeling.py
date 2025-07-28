@@ -266,6 +266,7 @@ def main(args: Args, tc: TokenizerConfig, model_config: ModelConfig):
             "max_prompt_token_length": args.max_prompt_token_length,
         },
     ]
+    print(f'loading dataset')
     with accelerator.main_process_first():
         train_dataset = get_cached_dataset_tulu(
             dataset_mixer_list=args.dataset_mixer_list,
@@ -299,6 +300,8 @@ def main(args: Args, tc: TokenizerConfig, model_config: ModelConfig):
         visualize_token(train_dataset[0][CHOSEN_INPUT_IDS_KEY], tokenizer)
     if args.cache_dataset_only:
         return
+    
+    print('config ready')
 
     # ------------------------------------------------------------
     # Runtime setups and quick logging
@@ -348,6 +351,7 @@ def main(args: Args, tc: TokenizerConfig, model_config: ModelConfig):
             collate_fn=data_collator,
         )
 
+    print('loaded models and datasets')
     # sync random states for DataLoader(shuffle=True) before `accelerator.prepare`
     # see https://gist.github.com/vwxyzjn/2581bff1e48e185e0b85b6dfe1def79c
     torch.manual_seed(args.seed)
@@ -368,6 +372,7 @@ def main(args: Args, tc: TokenizerConfig, model_config: ModelConfig):
     episode = 0
     model.train()
     # training loop
+    print('starting training')
     for _ in range(args.num_train_epochs):
         for data in dataloader:
             episode += args.micro_batch_size

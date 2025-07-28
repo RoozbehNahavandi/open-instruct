@@ -944,7 +944,7 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
                 postprocessed_responses = []
                 logprobs = []
                 ref_logprobs = []
-                scores = []
+                lagr_scores = []
                 sequence_lengths = []
                 values = []
                 if accelerator.is_main_process:
@@ -1030,7 +1030,12 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
                     ).unsqueeze(0)  # [1, num_constraints]
 
                     # 3) compute only the *positive* violations
-                    violations = torch.clamp_min(constraint_vals - thresholds, 0.0)  # ReLU
+                    violations = torch.clamp_min(constraint_vals - thresholds, 0.0)
+
+                    if training_step % args.lagrange_update_interval == 0:
+                        # mean violation per constraint across the batch
+                        mean_violations = violations.mean(dim=0).tolist()
+                        lagrange.update(mean_violations)
 
                     # 4) total penalty = λᵢ·violationᵢ summed over constraints
                     lam = lagrange.get().to(violations.device)        # shape: [num_constraints]
@@ -1045,7 +1050,6 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
 
                     # 6) final Lagrangian‐constrained reward
                     lagrangian_reward = main_reward - penalty
-                    scores = lagrangian_reward
                     # print(f'score: {score} {score.shape}, full_value: {full_value} {full_value.shape}')
                     # print('--------------')
                     value = full_value[:, context_length - 1 : -1].squeeze(-1)
@@ -1055,14 +1059,14 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
                     logprobs.append(logprob)
                     ref_logprobs.append(ref_logprob)
                     sequence_lengths.append(sequence_length)
-                    scores.append(score)
+                    lagr_scores.append(lagrangian_reward)
                     values.append(value)
                 responses = torch.cat(responses, 0)
                 postprocessed_responses = torch.cat(postprocessed_responses, 0)
                 logprobs = torch.cat(logprobs, 0)
                 ref_logprobs = torch.cat(ref_logprobs, 0)
                 sequence_lengths = torch.cat(sequence_lengths, 0)
-                scores = torch.cat(scores, 0)
+                scores = torch.cat(lagr_scores, 0)
                 global_scores = accelerator.gather(scores)
                 accelerator.print(f"global_scores: {global_scores}, {global_scores.mean()}")
                 values = torch.cat(values, 0)
@@ -1199,13 +1203,9 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
                             vf_clipfrac_stats[epoch_idx, minibatch_idx, gradient_accumulation_idx] = vf_clipfrac
                             entropy_stats[epoch_idx, minibatch_idx, gradient_accumulation_idx] = entropy.mean()
                             ratio_stats[epoch_idx, minibatch_idx, gradient_accumulation_idx] = ratio.mean()
-
-                        if training_step % args.lagrange_update_interval == 0:
-                            # mean violation per constraint across the batch
-                            mean_violations = violations.mean(dim=0).tolist()
-                            lagrange.update(mean_violations)
-
                     gradient_accumulation_idx += 1
+
+
                 minibatch_idx += 1
                 # fmt: off
                 del (
@@ -1262,7 +1262,7 @@ def main(args: Args, dataset_config: DatasetConfig, model_config: ModelConfig):
                             # mean RM score
                             rm_mean = constraint_vals[:, i].mean().item()
                             # threshold
-                            thr = constraint_thresholds[rm_name]
+                            thr = args.constraint_thresholds[rm_name]
                             # violation rate = fraction of batch where RM > threshold
                             v_rate = (violations[:, i] > 0.0).float().mean().item()
                             # λ value
